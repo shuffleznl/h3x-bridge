@@ -172,7 +172,7 @@ class PylontechNumber(CoordinatorEntity, NumberEntity):
             if self.coordinator.override.weather_active:
                 raise HomeAssistantError("Disable weather reserve before changing manual power")
             if value < 0:
-                await self.coordinator.override.async_set("force_charge_rate", max(1, round(abs(value))))
+                await self.coordinator.override.async_set("force_charge_rate", max(1, round(abs(value))), refresh=False)
                 await self.coordinator.override.async_set("force_charge", True)
                 return
             if self.coordinator.override.active:

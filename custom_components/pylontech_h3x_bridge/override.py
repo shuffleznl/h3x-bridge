@@ -157,7 +157,7 @@ class ChargeOverride:
         self._saved_slots = None
         self._schedules_prepared = False
 
-    async def async_set(self, key, value):
+    async def async_set(self, key, value, *, refresh=True):
         async with self._lock:
             if (
                 key == "charge_method"
@@ -179,7 +179,8 @@ class ChargeOverride:
                 self._owns_command = True
             self._last_command = None
             await self._save()
-        await self.coordinator.async_request_refresh()
+        if refresh:
+            await self.coordinator.async_refresh()
 
     def diagnostics(self):
         return {

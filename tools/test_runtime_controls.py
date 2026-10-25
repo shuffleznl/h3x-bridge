@@ -162,8 +162,7 @@ async def test_manual_override_blocks_optimizer_and_stops(system):
     assert not await c.async_set_charge_discharge_power(500)
     assert not await c.async_write_register(40907, 0)
     assert not (await c.async_clear_time_slot(slot=4))["success"]
-    control.manual_until = None
-    await control.async_tick(c.data)
+    await control.async_set("force_charge", False)
     assert registers[(2, 40901)] == 0
     assert registers[(2, 40907)] == 0
 
@@ -171,7 +170,7 @@ async def test_manual_override_blocks_optimizer_and_stops(system):
 @pytest.mark.asyncio
 async def test_negative_dashboard_value_latches_manual_override(system):
     hass, c, control, entry, registers = system
-    c.async_request_refresh = AsyncMock()
+    c.async_refresh = AsyncMock()
     description = next(
         item for item in NUMBER_TYPES if item.key == "charge_discharge_power"
     )
@@ -180,6 +179,7 @@ async def test_negative_dashboard_value_latches_manual_override(system):
     await number.async_set_native_value(-10)
     assert control.manual_until is not None
     assert control.settings["force_charge_rate"] == 10
+    assert c.async_refresh.await_count == 1
     await control.async_tick(c.data)
     assert registers[(2, 40901)] == 65436
 
