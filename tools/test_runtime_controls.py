@@ -15,6 +15,7 @@ import pytest_asyncio
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from homeassistant.core import Context, HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from custom_components.pylontech_h3x_bridge.config_flow import (
     CannotConnect,
     connection_schema,
@@ -27,7 +28,10 @@ from custom_components.pylontech_h3x_bridge.override import (
     ChargeOverride,
     warning_level,
 )
-from custom_components.pylontech_h3x_bridge.transport import ModbusTransportError
+from custom_components.pylontech_h3x_bridge.transport import (
+    ModbusTransportError,
+    ModbusDeviceException,
+)
 from h3x_modbus_emulator import build_registers, handle_client
 
 
@@ -165,6 +169,7 @@ async def test_manual_override_blocks_optimizer_and_stops(system):
     await control.async_set("force_charge", False)
     assert registers[(2, 40901)] == 0
     assert registers[(2, 40907)] == 0
+    assert c.data["ems_mode"] == "0"
 
 
 @pytest.mark.asyncio
@@ -198,6 +203,104 @@ async def test_grid_headroom_and_unavailable_meter(system):
     await control.async_tick(c.data)
     assert registers[(2, 40901)] == 0
     assert "grid power unavailable" in control.reason
+
+
+@pytest.mark.asyncio
+async def test_manual_negative_does_not_require_a_24_register_read(system):
+    hass, c, control, entry, registers = system
+    read = c.client.read_holding_registers
+
+    async def limited_read(address, count, slave):
+        if address == 40908 and count > 6:
+            raise ModbusDeviceException(3, 2)
+        return await read(address, count, slave)
+
+    c.client.read_holding_registers = limited_read
+    number = PylontechNumber(
+        c, next(d for d in NUMBER_TYPES if d.key == "charge_discharge_power"), entry
+    )
+    number.async_set_context(Context(user_id="test-user"))
+    await number.async_set_native_value(-10)
+    assert registers[(2, 40901)] == 0xFF9C
+
+
+@pytest.mark.asyncio
+async def test_signed_register_wire_bytes_match_manufacturer(system, monkeypatch):
+    hass, c, control, entry, registers = system
+    await c._ensure_connected()
+    frames = []
+    write = c.client._writer.write
+
+    def capture(frame):
+        frames.append(frame)
+        return write(frame)
+
+    monkeypatch.setattr(c.client._writer, "write", capture)
+    assert await c.async_set_charge_discharge_power(-100)
+    assert bytes.fromhex("02069fc5ff9c") in [frame[6:] for frame in frames]
+    assert c.last_power_command["readback_raw"] == -100
+    assert c.last_power_command["readback_matches"] is True
+    frames.clear()
+    assert await c.async_set_charge_discharge_power(100)
+    assert bytes.fromhex("02069fc50064") in [frame[6:] for frame in frames]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reference,mode", [(0, 4), (65436, 0)])
+async def test_acknowledged_but_unapplied_command_is_not_success(
+    system, reference, mode
+):
+    hass, c, control, entry, registers = system
+    read = c.client.read_holding_registers
+
+    async def unapplied_read(address, count, slave):
+        result = await read(address, count, slave)
+        if address == 40901 and count == 7:
+            result[0], result[6] = reference, mode
+        return result
+
+    c.client.read_holding_registers = unapplied_read
+    assert not await c.async_set_charge_discharge_power(-100)
+    assert c.last_power_command["write_acknowledged"] is True
+    assert c.last_power_command["readback_matches"] is False
+    assert c._power_command_sequence == 0
+
+
+@pytest.mark.asyncio
+async def test_status_charging_without_measured_power_is_not_confirmed(system):
+    hass, c, control, entry, registers = system
+    control.manual_until = datetime.now(timezone.utc) + timedelta(hours=1)
+    c.data["battery_status"] = "Charging"
+    c.data["battery_power"] = 0
+    await control.async_tick(c.data)
+    assert control.reason.endswith("awaiting measured charging")
+
+
+@pytest.mark.asyncio
+async def test_force_charge_reports_zero_headroom_instead_of_success(system):
+    hass, c, control, entry, registers = system
+    control.options["grid_power_entity"] = "sensor.shelly_grid"
+    hass.states.async_set("sensor.shelly_grid", "17500", {"unit_of_measurement": "W"})
+    with pytest.raises(HomeAssistantError, match="below minimum"):
+        await control.async_set("force_charge", True)
+    assert control.power_budget["charge_headroom_w"] == 0
+    assert control.power_budget["target_reference_raw"] == 0
+    assert registers[(2, 40901)] == 0
+
+
+@pytest.mark.asyncio
+async def test_failed_preparation_is_not_reported_as_success(system):
+    hass, c, control, entry, registers = system
+    read = c.client.read_holding_registers
+
+    async def failing_read(address, count, slave):
+        if address == 40908:
+            raise ModbusDeviceException(3, 2)
+        return await read(address, count, slave)
+
+    c.client.read_holding_registers = failing_read
+    with pytest.raises(HomeAssistantError, match="Charge control failed"):
+        await control.async_set("force_charge", True)
 
 
 @pytest.mark.asyncio

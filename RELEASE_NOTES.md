@@ -1,13 +1,11 @@
-# H3X Bridge 0.4.0
+# H3X Bridge 0.4.1
 
-- Validate hostnames/IP addresses and perform a Modbus read before saving an endpoint. Use asynchronous DNS and IPv4/IPv6 connection racing; stop a failed polling cycle at its first transport error.
-- Safely test replacement endpoints without holding a competing connection open. Use Home Assistant's standard reload lifecycle.
-- Keep negative power values entered by a signed-in user active through a bounded manual override. Add a Force Charge switch, charge-rate control and measured charging diagnostics.
-- Offer User-reference, PN-Customer charge-slot and User charge-slot methods. Save, suspend and restore competing inverter schedules.
-- Add optional KNMI yellow/orange/red reserve control: charge to 100%, notify/chime once, then cap discharge while retaining 90% SOC. Select the local warning sensor, signed Shelly grid sensor and optional siren in Configure.
-- Respect configured battery/grid power caps, live grid headroom, valid SOC/temperature and a 0.5C limit when module-derived capacity is available. Save restoration data across reloads.
-- Update entity/register documentation and include 32 runtime tests against Home Assistant 2026.10.4 with a Modbus TCP emulator. Existing protocol validators also pass.
+- Fix the eight new override/weather controls receiving device-name-dependent IDs. Assign documented IDs and migrate recognizable automatically generated 0.4.0 IDs; preserve deliberate custom IDs/names and occupied targets.
+- Read saved schedules in six-register blocks instead of requiring a 24-register read. Surface failed preparation and zero-headroom pauses as actionable errors rather than apparently successful charging requests.
+- Verify register 40901 and EMS mode immediately after direct power writes, with requested signed value, wire word, acknowledgement and read-back diagnostics. Negative still means charge: -10% becomes signed -100, wire word FF9C. Time-slot power remains unsigned with Charge mode 0.
+- Separate requested power, verified register reference, grid headroom and measured battery response. Dashboard attributes exist even before the first command; unavailable measurements are null, not invented zeros.
+- Test real Home Assistant entity registration, upgrade migration and dashboard attribute contracts alongside signed TCP frames, control ownership, weather reserve and failure paths against the local Modbus emulator.
 
-Requires Home Assistant 2025.3 or newer. Update the dashboard/controller integration alongside this bridge to expose the new controls and pause optimizer writes during overrides. Imported storage-mode dashboards require a fresh YAML import; YAML-mode dashboards referencing the packaged file follow package updates.
+Requires Home Assistant 2025.3 or newer. Restart Home Assistant after updating. The eight new default dashboard IDs are repaired without reimporting YAML; custom-renamed entities still require matching YAML. Updated controller dashboards add charging-headroom and register-verification rows. Imported storage-mode dashboards need a fresh import for new rows; YAML-mode dashboards referencing packaged files follow package updates.
 
-No live inverter or Home Assistant installation was connected during validation. A successful register read-back cannot establish physical charging; use the status/power diagnostics and test your selected charging method at a low rate.
+No physical inverter or live installation was connected. Matching register read-back establishes command acceptance, not physical charging. Test at a low rate and check measured Battery Power/Status and any pause reason. This release does not bypass inverter/BMS interlocks.

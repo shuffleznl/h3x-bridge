@@ -95,6 +95,9 @@ class PylontechCoordinator(DataUpdateCoordinator):
         self._modbus_lock = asyncio.Lock()
         self._last_client_reset: float | None = None
         self.override = None
+        self.last_power_command = {}
+        self._power_command_sequence = 0
+        self._verified_power_command = None
         
         super().__init__(
             hass,
@@ -164,11 +167,17 @@ class PylontechCoordinator(DataUpdateCoordinator):
         async with self._modbus_lock:
             data = await self._async_update_data_locked()
         if self.override:
+            command_sequence = self._power_command_sequence
             try:
                 await self.override.async_tick(data)
             except Exception as err:
                 raise UpdateFailed(f"Charge override failed: {err}") from err
             data.update(self.override.diagnostics())
+            if self._power_command_sequence != command_sequence:
+                reference, mode = self._verified_power_command
+                data["charge_discharge_power"] = reference
+                if reference:
+                    data["ems_mode"] = str(mode)
         return data
 
     async def _async_update_data_locked(self):
@@ -560,6 +569,12 @@ class PylontechCoordinator(DataUpdateCoordinator):
             return False
 
         async with self._modbus_lock:
+            self.last_power_command = {
+                "requested_reference_percent": value / 10,
+                "requested_reference_raw": value,
+                "requested_register_word_hex": f"0x{register_value:04X}",
+                "write_acknowledged": False, "readback_matches": False,
+            }
             if value != 0:
                 mode_success = await self._write_register_locked(
                     REGISTER_EMS_MODE,
@@ -583,10 +598,29 @@ class PylontechCoordinator(DataUpdateCoordinator):
                 raw_value=value,
                 signed=True,
             )
+            if success:
+                self.last_power_command["write_acknowledged"] = True
+                try:
+                    registers = await self.client.read_holding_registers(40901, 7, slave)
+                    observed = get_16bit_int(registers, 0)
+                    mode = registers[6]
+                    matches = observed == value and (not value or mode == EMS_MODE_USER)
+                    self.last_power_command.update(
+                        readback_raw=observed, readback_mode=mode, readback_matches=matches
+                    )
+                    success = matches
+                    if not matches:
+                        _LOGGER.error("Power command read-back mismatch: requested %s, got %s in mode %s", value, observed, mode)
+                except ModbusTransportError as err:
+                    self.last_power_command["readback_error"] = str(err)
+                    self._reset_client()
+                    success = False
 
-        if success:
-            if self.data is not None:
-                self.data["charge_discharge_power"] = value
+            if success:
+                self._verified_power_command = (observed, mode)
+                self._power_command_sequence += 1
+                if self.data is not None:
+                    self.data["charge_discharge_power"] = value
         return success
 
     async def async_program_charge_slot(

@@ -126,6 +126,25 @@ When clock synchronization is enabled, the integration writes:
 | `40934` (`0x9FE6`) | `(hour << 8) | minute` |
 | `40935` (`0x9FE7`) | `(second << 8) | weekday`, where Sunday is `0` |
 
+## Release 0.4.1
+
+- Fix missing override/weather dashboard controls when the saved bridge/device name differs from "Pylontech H3X Bridge". New controls use stable IDs; automatically generated 0.4.0 IDs migrate on setup. Legacy telemetry/control IDs, explicit custom names/IDs and IDs belonging to another device are preserved.
+- Avoid a mandatory 24-register schedule read before manual charging. Each schedule is read as its own six-register block, and failures now raise an actionable Home Assistant service error.
+- Confirm the actual 40901 reference and 40907 mode after direct power writes. An acknowledged Modbus packet and a matching register value are separate from measured battery charging.
+- Expose grid headroom, requested/permitted power, raw signed reference and read-back verification in the charge-control diagnostics. A zero-watt charge request caused by limits is reported as paused, not "manual force charge".
+
+The sign and scale are unchanged and verified against the manufacturer protocol and literal Modbus TCP bytes:
+
+| Home Assistant input | Raw S16 at 40901 | Wire word | Meaning |
+| --- | ---: | --- | --- |
+| `-10%` | `-100` | `0xFF9C` | Charge |
+| `0%` | `0` | `0x0000` | Zero reference |
+| `+10%` | `100` | `0x0064` | Discharge |
+
+For direct reference control, mode 40907 is set to `4` first. Time-slot methods instead use a positive U16 power magnitude with slot mode `0` for charging. Do not invert the sign to try to correct a non-charging inverter.
+
+After updating and restarting, the previous dashboard's eight default control IDs should resolve without reimporting it. Updated dashboard packages additionally show headroom and read-back diagnostics. User-renamed controls need the matching custom IDs in the dashboard.
+
 ## Release 0.4.0
 
 Requires Home Assistant 2025.3 or newer; runtime tests use Home Assistant 2026.10.4.
@@ -182,7 +201,7 @@ The controller needs Home Assistant and working Modbus communication to enforce 
 - `Pn%` is a percentage of the inverter's rated power, not a kW command. Confirm the applicable inverter rating and start with a small magnitude while observing physical battery and grid power.
 - The integration always sets EMS mode `40907` to `4` (`User mode`) before nonzero charge/discharge power writes.
 - The integration uses a small raw Modbus TCP transport instead of PyModbus. Requests stay serialized on one socket, and late duplicate ACK frames are discarded until the matching transaction id is received.
-- The integration performs its own locked write retries and keeps confirmation reads on the normal polling cycle.
+- The integration performs its own locked write retries. Direct power commands verify the signed reference and EMS mode under the same lock before reporting success; normal polling separately checks the physical battery response.
 - The BMS module count is read from ESS register `0x1436` / decimal `5174`, calculated as ESS base `0x1400` plus offset `0x0036` ("Module number in series").
 - Total and usable capacity are derived from the Force H3 datasheet table for the detected module count. The derived usable capacity is checked against the 95% depth-of-discharge theoretical value and exposed with a deviation percentage.
 - IP and port can be changed later from **Settings > Devices & services > Pylontech H3X Bridge > Configure**.
@@ -200,6 +219,14 @@ Version `0.3.0` keeps the service-based control using the manufacturer time-slot
 | `pylontech_h3x_bridge.clear_time_slot` | Disable one time slot. |
 
 The slot command writes `40908-40931` style registers: disable slot, optionally sync inverter clock (`40932-40935`), write start/end/mode/power/weekday, set EMS mode, then enable the slot.
+
+## Validation
+
+Run `python -m pytest tools/test_runtime_controls.py tools/test_bridge_registry.py -q` in an environment with Home Assistant 2026.10.4, pytest, pytest-asyncio and PyYAML. These tests use actual entity platforms/registries and a local Modbus TCP emulator. They cover signed charge/discharge wire frames, failed preparation, power limits, control ownership and the eight override/weather IDs. Dashboard attributes are checked in idle and after a charge request; when sibling controller checkouts are available, both dashboard YAML files are parsed and every bridge attribute row is checked against actual Home Assistant states.
+
+GitHub CI checks out the controller dashboards for these runtime contract tests. Controller repositories also run the entity/attribute suite against the current bridge, so a dashboard change is validated against actual Home Assistant states rather than only expected name strings.
+
+The emulator verifies software behavior, not inverter firmware or physical response. Confirm measured battery power at a low rate on the installation before relying on automatic control.
 
 ## Files
 

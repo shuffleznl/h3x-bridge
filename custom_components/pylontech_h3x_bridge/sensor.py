@@ -20,6 +20,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, MANUFACTURER, MODEL
+from .entity_ids import set_control_entity_id
 
 # Hier definiëren we alle sensoren. De 'key' moet exact overeenkomen 
 # met de naam die we in coordinator.py aan de data dictionary hebben gegeven!
@@ -303,13 +304,18 @@ class PylontechSensor(CoordinatorEntity, SensorEntity):
         if self.entity_description.key != "charge_control_status":
             return None
         control = self.coordinator.override
-        return {"weather_alert_entity": control.options.get("weather_alert_entity"),
+        raw_reference = self.coordinator.data.get("charge_discharge_power")
+        requested = control.power_budget.get("target_reference_raw", raw_reference)
+        return {"charge_headroom_w": None, "grid_without_battery_w": None,
+                **control.power_budget, "weather_alert_entity": control.options.get("weather_alert_entity"),
                 "grid_power_entity": control.options.get("grid_power_entity"),
                 "siren_entity": control.options.get("alert_siren_entity"),
                 "manual_charge_expires": control.manual_until.isoformat() if control.manual_until else None,
                 "weather_full_charge_reached": control.weather_full,
                 "charge_method": control.settings["charge_method"],
-                "requested_power_percent": self.coordinator.data.get("charge_discharge_power", 0) / 10,
+                "requested_power_percent": requested / 10 if requested is not None else None,
+                "readback_reference_percent": raw_reference / 10 if raw_reference is not None else None,
+                "power_control_path": "time_slot" if control._slot_active else "signed_reference",
                 "measured_battery_status": self.coordinator.data.get("battery_status"),
                 "measured_battery_power_w": self.coordinator.data.get("battery_power")}
 
@@ -325,6 +331,7 @@ class PylontechSensor(CoordinatorEntity, SensorEntity):
         
         # Zorgt voor unieke ID's in de database
         self._attr_unique_id = f"{DOMAIN}_{entry.data['host']}_{description.key}"
+        set_control_entity_id(self, "sensor", description.key)
 
         # Dit groepeert alle sensoren onder één Apparaat in Home Assistant
         self._attr_device_info = {

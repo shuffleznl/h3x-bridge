@@ -8,6 +8,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, MANUFACTURER, MODEL
+from .entity_ids import set_control_entity_id
 
 @dataclass
 class PylontechSwitchEntityDescription(SwitchEntityDescription):
@@ -90,6 +91,7 @@ class PylontechSwitch(CoordinatorEntity, SwitchEntity):
         self.entity_description = description
         
         self._attr_unique_id = f"{DOMAIN}_{entry.data['host']}_{description.key}"
+        set_control_entity_id(self, "switch", description.key)
         self._attr_device_info = {
             "identifiers": {(DOMAIN, entry.entry_id)},
             "name": entry.title,

@@ -9,6 +9,7 @@ import logging
 import math
 
 from homeassistant.helpers.storage import Store
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
 
 OVERRIDE_OWNER = ContextVar("h3x_override_owner", default=False)
@@ -89,6 +90,7 @@ class ChargeOverride:
         self._owns_command = False
         self._saved_slots = None
         self._schedules_prepared = False
+        self.power_budget = {}
         self._lock = asyncio.Lock()
 
     @property
@@ -131,7 +133,10 @@ class ChargeOverride:
         if self._saved_slots is None:
             async with c._modbus_lock:
                 await c._ensure_connected()
-                self._saved_slots = await c.client.read_holding_registers(40908, 24, 2)
+                slots = []
+                for address in range(40908, 40932, 6):
+                    slots.extend(await c.client.read_holding_registers(address, 6, 2))
+                self._saved_slots = slots
             await self._save()
         for offset in range(0, 24, 6):
             if self._saved_slots[offset] and not await c.async_write_register(
@@ -181,6 +186,10 @@ class ChargeOverride:
             await self._save()
         if refresh:
             await self.coordinator.async_refresh()
+            if not self.coordinator.last_update_success:
+                raise HomeAssistantError(f"Charge control failed: {self.coordinator.last_exception}")
+            if key == "force_charge" and value and self.reason.startswith("paused:"):
+                raise HomeAssistantError(self.reason)
 
     def diagnostics(self):
         return {
@@ -254,6 +263,7 @@ class ChargeOverride:
 
     async def _tick(self, data):
         c = self.coordinator
+        self.power_budget = {}
         now = datetime.now(timezone.utc)
         source = self.hass.states.get(self.options.get("weather_alert_entity", ""))
         level = warning_level(source, now)
@@ -289,6 +299,7 @@ class ChargeOverride:
                     self._saved_charge_soc = None
                 if not await c.async_write_register(40907, 0):
                     raise RuntimeError("Failed to restore self-consumption mode")
+                data["ems_mode"] = "0"
                 self._last_command = None
                 self._owns_command = False
                 await self._save()
@@ -377,6 +388,14 @@ class ChargeOverride:
         headroom = max(
             0, self.options.get("grid_connection_limit_w", 17500) - 500 - base_grid
         )
+        self.power_budget = {
+            "grid_power_w": grid, "battery_power_w": data.get("battery_power"),
+            "grid_without_battery_w": base_grid,
+            "grid_limit_w": self.options.get("grid_connection_limit_w", 17500),
+            "grid_margin_w": 500, "charge_headroom_w": round(headroom),
+            "battery_power_cap_w": maximum,
+            "requested_charge_rate_percent": self.settings["force_charge_rate"],
+        }
         if weather and self.weather_full:
             demand = max(0, grid + data.get("ac_total_power", 0))
             watts = min(
@@ -392,6 +411,13 @@ class ChargeOverride:
             self.reason = (
                 "weather reserve: charge to 100%" if weather else "manual force charge"
             )
+            self.power_budget["requested_charge_w"] = rated * percent / 100
+            self.power_budget["permitted_charge_w"] = watts
+            if raw == 0:
+                self.reason = (
+                    f"paused: charging power below minimum {rated / 100:.0f} W; "
+                    f"headroom {headroom:.0f} W, battery cap {maximum:.0f} W"
+                )
         local = dt_util.now()
         if (
             raw < 0
@@ -401,6 +427,7 @@ class ChargeOverride:
         ):
             raw = 0
             self.reason = "time-slot charging paused until midnight"
+        self.power_budget["target_reference_raw"] = raw
         if raw:
             expected_mode = (
                 5
@@ -413,5 +440,5 @@ class ChargeOverride:
             ):
                 self._last_command = None
         await self._command(raw)
-        if raw < 0 and data.get("battery_status") != "Charging":
+        if raw < 0 and (data.get("battery_power") is None or data["battery_power"] > -50):
             self.reason += "; awaiting measured charging"

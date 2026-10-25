@@ -10,6 +10,7 @@ from .const import DOMAIN, CONF_HOST, CONF_PORT
 from .coordinator import PylontechCoordinator
 from .services import async_setup_services
 from .override import ChargeOverride
+from .entity_ids import migrate_control_entity_ids
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     
     hass.data[DOMAIN][entry.entry_id] = coordinator
+    migrate_control_entity_ids(hass, entry)
 
     
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

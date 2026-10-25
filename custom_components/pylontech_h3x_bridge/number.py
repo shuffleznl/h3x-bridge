@@ -13,6 +13,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, MANUFACTURER, MODEL
+from .entity_ids import set_control_entity_id
 from homeassistant.exceptions import HomeAssistantError
 
 @dataclass
@@ -139,11 +140,32 @@ class PylontechNumber(CoordinatorEntity, NumberEntity):
         super().__init__(coordinator)
         
         self._attr_unique_id = f"{DOMAIN}_{entry.data['host']}_{description.key}"
+        set_control_entity_id(self, "number", description.key)
         self._attr_device_info = {
             "identifiers": {(DOMAIN, entry.entry_id)},
             "name": entry.title,
             "manufacturer": MANUFACTURER,
             "model": MODEL,
+        }
+
+    @property
+    def extra_state_attributes(self):
+        if self.entity_description.key != "charge_discharge_power":
+            return None
+        control = self.coordinator.override
+        raw = self.coordinator.data.get("charge_discharge_power")
+        slot_active = control._slot_active
+        return {
+            "register": 40901, "raw_unit": "0.1Pn%",
+            "raw_reference": raw,
+            "register_word_hex": f"0x{raw & 0xFFFF:04X}" if raw is not None else None,
+            "negative_means": "charge", "positive_means": "discharge",
+            "control_reason": control.reason,
+            "power_control_path": "time_slot" if slot_active else "signed_reference",
+            **control.power_budget,
+            "readback_raw": raw,
+            "readback_matches": None,
+            **(self.coordinator.last_power_command if not slot_active else {}),
         }
 
     @property
