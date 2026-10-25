@@ -24,7 +24,7 @@ jobs:
       - name: Install current Home Assistant test runtime
         run: python -m pip install homeassistant==2026.10.4 pytest pytest-asyncio PyYAML
       - name: Exercise hostname, signed charge and weather reserve controls
-        run: python -m pytest tools/test_runtime_controls.py tools/test_bridge_registry.py -q
+        run: python -m pytest tools/test_runtime_controls.py tools/test_bridge_registry.py tools/test_service_control.py -q
   validate:
     runs-on: ubuntu-latest
     steps:

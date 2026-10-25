@@ -273,7 +273,25 @@ async def test_status_charging_without_measured_power_is_not_confirmed(system):
     c.data["battery_status"] = "Charging"
     c.data["battery_power"] = 0
     await control.async_tick(c.data)
-    assert control.reason.endswith("awaiting measured charging")
+    assert control.reason == "manual force charge"
+    assert control.charging_response == "awaiting_measured_charging"
+
+
+@pytest.mark.asyncio
+async def test_charging_confirmation_needs_two_agreeing_observations(system):
+    hass, c, control, entry, registers = system
+    control.manual_until = datetime.now(timezone.utc) + timedelta(hours=1)
+    for status, power in [("Idle", -100), ("Charging", -20), ("Charging", -1000)]:
+        c.data.update(battery_status=status, battery_power=power)
+        await control.async_tick(c.data)
+        assert control.charging_response == "awaiting_measured_charging"
+        assert control.reason == "manual force charge"
+    await control.async_tick(c.data)
+    assert control.charging_response == "charging_confirmed"
+    c.data["battery_power"] = 0
+    await control.async_tick(c.data)
+    assert control.charging_response == "awaiting_measured_charging"
+    assert control.reason == "manual force charge"
 
 
 @pytest.mark.asyncio

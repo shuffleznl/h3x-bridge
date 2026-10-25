@@ -300,24 +300,47 @@ class PylontechSensor(CoordinatorEntity, SensorEntity):
     _attr_has_entity_name = True
 
     @property
+    def available(self) -> bool:
+        """Expose local diagnostics even when physical telemetry is unavailable."""
+        if self.entity_description.key in {"control_owner", "charge_control_status"}:
+            return True
+        return super().available
+
+    @property
     def extra_state_attributes(self):
         if self.entity_description.key != "charge_control_status":
             return None
-        control = self.coordinator.override
-        raw_reference = self.coordinator.data.get("charge_discharge_power")
+        coordinator = self.coordinator
+        control = coordinator.override
+        raw_reference = coordinator.data.get("charge_discharge_power")
         requested = control.power_budget.get("target_reference_raw", raw_reference)
-        return {"charge_headroom_w": None, "grid_without_battery_w": None,
-                **control.power_budget, "weather_alert_entity": control.options.get("weather_alert_entity"),
-                "grid_power_entity": control.options.get("grid_power_entity"),
-                "siren_entity": control.options.get("alert_siren_entity"),
-                "manual_charge_expires": control.manual_until.isoformat() if control.manual_until else None,
-                "weather_full_charge_reached": control.weather_full,
-                "charge_method": control.settings["charge_method"],
-                "requested_power_percent": requested / 10 if requested is not None else None,
-                "readback_reference_percent": raw_reference / 10 if raw_reference is not None else None,
-                "power_control_path": "time_slot" if control._slot_active else "signed_reference",
-                "measured_battery_status": self.coordinator.data.get("battery_status"),
-                "measured_battery_power_w": self.coordinator.data.get("battery_power")}
+        telemetry_available = coordinator.last_update_success
+        error = control.last_error or coordinator.last_power_command.get("command_error", "none")
+        if not telemetry_available and coordinator.last_exception:
+            error = str(coordinator.last_exception)
+        return {
+            "charge_headroom_w": None,
+            "grid_without_battery_w": None,
+            **control.power_budget,
+            "weather_alert_entity": control.options.get("weather_alert_entity"),
+            "grid_power_entity": control.options.get("grid_power_entity"),
+            "siren_entity": control.options.get("alert_siren_entity"),
+            "manual_charge_expires": control.manual_until.isoformat() if control.manual_until else None,
+            "weather_full_charge_reached": control.weather_full,
+            "charge_method": control.settings["charge_method"],
+            "requested_power_percent": requested / 10 if requested is not None else None,
+            "readback_reference_percent": raw_reference / 10 if raw_reference is not None else None,
+            "power_control_path": "time_slot" if control._slot_active else "signed_reference",
+            "last_rejected_command": coordinator.last_rejected_command,
+            "last_rejected_entity_id": (coordinator.last_rejected_command or {}).get("entity_id", "none"),
+            "last_power_command_error": coordinator.last_power_command.get("command_error", "none"),
+            "last_control_error": error,
+            "charging_response": control.charging_response,
+            "charging_observations": control.charging_observations,
+            "telemetry_available": telemetry_available,
+            "measured_battery_status": coordinator.data.get("battery_status") if telemetry_available else None,
+            "measured_battery_power_w": coordinator.data.get("battery_power") if telemetry_available else None,
+        }
 
     def __init__(
         self,
@@ -344,5 +367,7 @@ class PylontechSensor(CoordinatorEntity, SensorEntity):
     @property
     def native_value(self):
         """Return the state of the sensor."""
+        if self.entity_description.key in {"control_owner", "charge_control_status"}:
+            return self.coordinator.override.diagnostics()[self.entity_description.key]
         # Haal de waarde op uit de dictionary die we in coordinator.py hebben gebouwd
         return self.coordinator.data.get(self.entity_description.key)

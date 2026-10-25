@@ -100,8 +100,19 @@ class PylontechSwitch(CoordinatorEntity, SwitchEntity):
         }
 
     @property
+    def available(self) -> bool:
+        """An owner must still be stoppable after a failed control command."""
+        if self.entity_description.key in {"force_charge", "weather_reserve"}:
+            return True
+        return super().available
+
+    @property
     def is_on(self) -> bool | None:
         """Return true if the switch is on."""
+        if self.entity_description.key == "force_charge":
+            return self.coordinator.override.manual_until is not None
+        if self.entity_description.key == "weather_reserve":
+            return self.coordinator.override.settings["weather_reserve"]
         value = self.coordinator.data.get(self.entity_description.key)
         if value is None:
             return None

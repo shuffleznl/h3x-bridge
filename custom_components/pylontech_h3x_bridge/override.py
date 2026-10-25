@@ -91,6 +91,9 @@ class ChargeOverride:
         self._saved_slots = None
         self._schedules_prepared = False
         self.power_budget = {}
+        self.charging_response = "not_requested"
+        self.charging_observations = 0
+        self.last_error = None
         self._lock = asyncio.Lock()
 
     @property
@@ -199,6 +202,8 @@ class ChargeOverride:
             if self.weather_active
             else "force_charge"
             if self.manual_until
+            else "restoring"
+            if self._owns_command
             else "automatic",
             "charge_control_status": self.reason,
         }
@@ -250,20 +255,49 @@ class ChargeOverride:
         )
         if raw != self._last_command or slot_due:
             if not await c.async_set_charge_discharge_power(raw):
-                raise RuntimeError("Charge/discharge command failed")
+                detail = ("Charge-slot programming failed; check bridge logs"
+                          if raw < 0 and self.settings["charge_method"] != "user_reference"
+                          else c.last_power_command.get("command_error"))
+                raise RuntimeError(detail or "Charge/discharge command failed")
             self._last_command = raw
 
     async def async_tick(self, data):
         async with self._lock:
             token = OVERRIDE_OWNER.set(True)
             try:
+                self.last_error = None
                 await self._tick(data)
+            except Exception as err:
+                self.last_error = str(err)
+                self.reason = "command failed"
+                self.charging_response = "command_failed"
+                self.charging_observations = 0
+                raise
             finally:
+                if self.charging_response == "not_requested":
+                    self.charging_observations = 0
                 OVERRIDE_OWNER.reset(token)
+
+    def _observe_charging(self, raw, data):
+        """Keep control intent separate from measured charging confirmation."""
+        if raw is None or raw >= 0:
+            self.charging_response = "not_requested"
+            self.charging_observations = 0
+            return
+        power = data.get("battery_power")
+        charging = (data.get("battery_status") == "Charging"
+                    and isinstance(power, (int, float)) and math.isfinite(power)
+                    and power <= -50)
+        self.charging_observations = self.charging_observations + 1 if charging else 0
+        self.charging_response = (
+            "charging_confirmed" if self.charging_observations >= 2
+            else "awaiting_measured_charging"
+        )
 
     async def _tick(self, data):
         c = self.coordinator
         self.power_budget = {}
+        self.charging_response = "not_requested"
         now = datetime.now(timezone.utc)
         source = self.hass.states.get(self.options.get("weather_alert_entity", ""))
         level = warning_level(source, now)
@@ -292,6 +326,7 @@ class ChargeOverride:
         if self.manual_until is None and not self.weather_active:
             if self._owns_command:
                 await self._command(0)
+                data["charge_discharge_power"] = 0
                 await self._restore_schedules()
                 if self._saved_charge_soc is not None:
                     if not await c.async_write_register(40902, self._saved_charge_soc):
@@ -308,11 +343,7 @@ class ChargeOverride:
                 if enabled and level is None
                 else "automatic control"
             )
-            if (
-                data.get("charge_discharge_power", 0) < 0
-                and data.get("battery_status") != "Charging"
-            ):
-                self.reason = "negative reference accepted; no measured charging (check charge method, SOC and inverter interlocks)"
+            self._observe_charging(data.get("charge_discharge_power", 0), data)
             return
         if weather and not self._beeped:
             try:
@@ -440,5 +471,4 @@ class ChargeOverride:
             ):
                 self._last_command = None
         await self._command(raw)
-        if raw < 0 and (data.get("battery_power") is None or data["battery_power"] > -50):
-            self.reason += "; awaiting measured charging"
+        self._observe_charging(raw, data)

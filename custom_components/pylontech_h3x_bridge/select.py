@@ -93,6 +93,13 @@ class PylontechSelect(CoordinatorEntity, SelectEntity):
         }
 
     @property
+    def available(self) -> bool:
+        """Local settings must remain accessible during communication failures."""
+        if self.entity_description.key in {"weather_threshold", "charge_method"}:
+            return True
+        return super().available
+
+    @property
     def current_option(self) -> str | None:
         """Geef de huidige ingestelde optie terug."""
         if self.entity_description.key in {"weather_threshold", "charge_method"}:
@@ -112,6 +119,9 @@ class PylontechSelect(CoordinatorEntity, SelectEntity):
         int_value = EMS_MODE_OPTIONS_REVERSE.get(option)
         
         if int_value is not None:
+            self.coordinator.raise_if_control_owned(
+                self.entity_description.register_address, self.entity_id, option
+            )
             success = await self.coordinator.async_write_register(
                 address=self.entity_description.register_address,
                 value=int_value,
@@ -123,4 +133,7 @@ class PylontechSelect(CoordinatorEntity, SelectEntity):
                 self.coordinator.data[self.entity_description.key] = str(int_value)
                 self.async_write_ha_state()
             else:
-                raise HomeAssistantError("Command failed or control is owned by force charge/weather reserve")
+                self.coordinator.raise_if_control_owned(
+                    self.entity_description.register_address, self.entity_id, option
+                )
+                raise HomeAssistantError(f"Modbus write failed for register {self.entity_description.register_address}; check bridge logs")

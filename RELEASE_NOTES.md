@@ -1,11 +1,12 @@
-# H3X Bridge 0.4.1
+# H3X Bridge 0.4.2
 
-- Fix the eight new override/weather controls receiving device-name-dependent IDs. Assign documented IDs and migrate recognizable automatically generated 0.4.0 IDs; preserve deliberate custom IDs/names and occupied targets.
-- Read saved schedules in six-register blocks instead of requiring a 24-register read. Surface failed preparation and zero-headroom pauses as actionable errors rather than apparently successful charging requests.
-- Verify register 40901 and EMS mode immediately after direct power writes, with requested signed value, wire word, acknowledgement and read-back diagnostics. Negative still means charge: -10% becomes signed -100, wire word FF9C. Time-slot power remains unsigned with Charge mode 0.
-- Separate requested power, verified register reference, grid headroom and measured battery response. Dashboard attributes exist even before the first command; unavailable measurements are null, not invented zeros.
-- Test real Home Assistant entity registration, upgrade migration and dashboard attribute contracts alongside signed TCP frames, control ownership, weather reserve and failure paths against the local Modbus emulator.
+- Replace the ambiguous "Command failed or control is owned" message with separate ownership-rejection and actual Modbus write/read-back errors. Record the competing entity, register, value and owner.
+- Preserve the direct force-charge owner path and authenticated negative-reference changes. Do not bypass ownership locks to hide a competing command.
+- Separate stable control intent from measured charging response. Confirmation requires two successive Charging-status observations with battery power at or below -50 W; loss of either clears confirmation. Requested wattage is not assumed to be delivered.
+- Expose charging response, the last rejected entity and the actual power-command failure, including when a failed force-charge service leaves entities unavailable. Identify pending restoration as its own ownership state.
+- Keep local override controls and diagnostic entities available through coordinator failures, so errors remain visible and stopping Force Charge is still possible. Physical telemetry remains unavailable until a successful poll.
+- Add real Home Assistant service/authentication tests and optimizer takeover cases before, during and after service dispatch, alongside the existing protocol and dashboard attribute checks.
 
-Requires Home Assistant 2025.3 or newer. Restart Home Assistant after updating. The eight new default dashboard IDs are repaired without reimporting YAML; custom-renamed entities still require matching YAML. Updated controller dashboards add charging-headroom and register-verification rows. Imported storage-mode dashboards need a fresh import for new rows; YAML-mode dashboards referencing packaged files follow package updates.
+Requires Home Assistant 2025.3 or newer. Update the controller alongside the bridge so mid-dispatch takeover yields cleanly. Restart Home Assistant and refresh an imported storage-mode dashboard for the new diagnostic rows; YAML-mode dashboards referencing packaged files follow package updates. Existing entity IDs and custom configuration are preserved.
 
 No physical inverter or live installation was connected. Matching register read-back establishes command acceptance, not physical charging. Test at a low rate and check measured Battery Power/Status and any pause reason. This release does not bypass inverter/BMS interlocks.

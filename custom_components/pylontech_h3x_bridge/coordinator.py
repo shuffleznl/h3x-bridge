@@ -5,6 +5,7 @@ import struct
 from datetime import datetime, timedelta
 
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import DOMAIN, DEFAULT_SCAN_INTERVAL
@@ -96,6 +97,7 @@ class PylontechCoordinator(DataUpdateCoordinator):
         self._last_client_reset: float | None = None
         self.override = None
         self.last_power_command = {}
+        self.last_rejected_command = None
         self._power_command_sequence = 0
         self._verified_power_command = None
         
@@ -110,6 +112,24 @@ class PylontechCoordinator(DataUpdateCoordinator):
     def _new_client(self) -> H3XModbusTcpClient:
         """Create a fresh Modbus TCP client."""
         return H3XModbusTcpClient(host=self.host, port=self.port, timeout=5)
+
+    def raise_if_control_owned(self, address, entity_id, value) -> None:
+        """Explain a service conflict without confusing it with a Modbus failure."""
+        if not (40901 <= address <= 40935 and self.override
+                and self.override.active and not OVERRIDE_OWNER.get()):
+            return
+        owner = self.override.diagnostics()["control_owner"]
+        self.last_rejected_command = {
+            "entity_id": entity_id, "register": address,
+            "requested_value": value, "owner": owner,
+        }
+        label = {"force_charge": "manual force charge", "weather_reserve": "weather reserve",
+                 "restoring": "restoring saved inverter settings"}.get(owner, owner)
+        raise ServiceValidationError(
+            f"Battery control is reserved by {label}; rejected {entity_id} "
+            f"command for register {address}. Stop the override before issuing "
+            "competing EMS, SOC or power commands. The competing command was not completed."
+        )
 
     async def _ensure_connected(self) -> None:
         """Ensure the Modbus TCP client is connected."""
@@ -585,6 +605,7 @@ class PylontechCoordinator(DataUpdateCoordinator):
                     settle_after=False,
                 )
                 if not mode_success:
+                    self.last_power_command["command_error"] = "EMS mode write failed (register 40907)"
                     return False
                 if self.data is not None:
                     self.data["ems_mode"] = str(EMS_MODE_USER)
@@ -610,11 +631,18 @@ class PylontechCoordinator(DataUpdateCoordinator):
                     )
                     success = matches
                     if not matches:
+                        self.last_power_command["command_error"] = (
+                            f"Register 40901 read-back {observed}, requested {value}; "
+                            f"EMS mode {mode}, expected {EMS_MODE_USER} for nonzero power"
+                        )
                         _LOGGER.error("Power command read-back mismatch: requested %s, got %s in mode %s", value, observed, mode)
                 except ModbusTransportError as err:
                     self.last_power_command["readback_error"] = str(err)
+                    self.last_power_command["command_error"] = f"Power command read-back failed: {err}"
                     self._reset_client()
                     success = False
+            else:
+                self.last_power_command["command_error"] = "Power reference write failed (register 40901)"
 
             if success:
                 self._verified_power_command = (observed, mode)

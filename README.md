@@ -126,6 +126,19 @@ When clock synchronization is enabled, the integration writes:
 | `40934` (`0x9FE6`) | `(hour << 8) | minute` |
 | `40935` (`0x9FE7`) | `(second << 8) | weekday`, where Sunday is `0` |
 
+## Release 0.4.2
+
+- Replace the ambiguous "Command failed or control is owned" service error. A conflicting entity/register is now identified as an ownership rejection; genuine power-write, mode-write and read-back failures report their actual stage.
+- Preserve the force-charge owner's direct command path. A signed-in user's negative power-reference action starts or updates manual charging; the dedicated rate control also remains usable during charging. Competing EMS/SOC/reference actions remain blocked intentionally.
+- Keep control intent separate from physical response. `charge_control_status` retains "manual force charge" while the `charging_response` attribute reports `awaiting_measured_charging`, `charging_confirmed`, `not_requested`, or `command_failed`. Confirmation requires two successive observations with battery status Charging and battery power at or below -50 W. A non-charging observation clears confirmation immediately; raw measured status/power are never smoothed or fabricated. This confirms charge direction, not delivery of the requested wattage.
+- Add `last_rejected_command`, `last_rejected_entity_id`, `last_control_error` and `last_power_command_error` diagnostics. Recovery while restoring saved settings is explicitly identified as `restoring` control ownership.
+- Keep the eight local override/settings/diagnostic entities available after polling or command failures. They read local intent rather than stale coordinator data, so Force Charge can still be turned off and its failure attributes remain visible. Physical telemetry and direct hardware controls remain unavailable until communication recovers; local availability does not imply a device write succeeded.
+- Exercise real `switch.turn_on`, `number.set_value`, authentication contexts and mid-dispatch takeover against Home Assistant and the Modbus emulator. Controller updates check ownership before and after each awaited service call and yield cleanly when preempted.
+
+A WebSocket API log mentioning `number.set_value` came from a browser-issued number action; it does not establish that the Force Charge switch rejected itself. Do not remove the ownership guard to suppress it. Set manual SOC/EMS parameters before starting Force Charge, or stop the override first. A negative user reference and the dedicated charge-rate control are the supported ways to adjust manual charging while it is active.
+
+Update the controller dashboard alongside the bridge to display measured charging response, the last competing entity and the actual Modbus failure separately. A correct negative register reference still does not prove the inverter is physically charging. Inverter/BMS interlocks remain authoritative; this release does not reverse signs or automatically probe other EMS modes.
+
 ## Release 0.4.1
 
 - Fix missing override/weather dashboard controls when the saved bridge/device name differs from "Pylontech H3X Bridge". New controls use stable IDs; automatically generated 0.4.0 IDs migrate on setup. Legacy telemetry/control IDs, explicit custom names/IDs and IDs belonging to another device are preserved.
@@ -163,8 +176,8 @@ Requires Home Assistant 2025.3 or newer; runtime tests use Home Assistant 2026.1
 | `switch.pylontech_h3x_bridge_weather_reserve` | Enable the optional natural-disaster / severe-weather reserve policy. Disabled by default. |
 | `select.pylontech_h3x_bridge_weather_alert_threshold` | Minimum KNMI colour: yellow (geel), orange (oranje, default), or red (rood). Higher colours also trigger. |
 | `number.pylontech_h3x_bridge_weather_discharge_rate` | Post-full-charge discharge cap, 0-20% of rated power; default 5%. |
-| `sensor.pylontech_h3x_bridge_control_owner` | `automatic`, `force_charge`, or `weather_reserve`. |
-| `sensor.pylontech_h3x_bridge_charge_control_status` | Charging/hold reason and measured response; attributes identify sources and expiry. |
+| `sensor.pylontech_h3x_bridge_control_owner` | `automatic`, `force_charge`, `weather_reserve`, or `restoring`. |
+| `sensor.pylontech_h3x_bridge_charge_control_status` | Local control intent/pause/failure reason. Attributes separately expose measured charging response, telemetry availability, sources, expiry and actual command failures. |
 
 In **Configure**, select a signed Shelly Pro 3EM grid power sensor (positive import, negative export, W or kW), the local KNMI warning-code/alerts sensor, and optionally a siren/chime. Set the actual inverter **Pn** rating, battery-circuit power cap and total grid connection cap. Defaults are 13.8 kW rated power, 11 kW battery power cap and 17.5 kW grid cap. The override subtracts current battery power from measured import, reserves 500 W headroom, and rounds charge commands down. A selected meter older than 120 seconds, invalid units, missing SOC/temperature, or BMS temperature outside 5-45 C pauses the override. The inverter/BMS protections remain authoritative. These are total three-phase power limits; per-phase fuse protection still requires the installation's own protection or a phase-aware EMS.
 
@@ -222,7 +235,7 @@ The slot command writes `40908-40931` style registers: disable slot, optionally 
 
 ## Validation
 
-Run `python -m pytest tools/test_runtime_controls.py tools/test_bridge_registry.py -q` in an environment with Home Assistant 2026.10.4, pytest, pytest-asyncio and PyYAML. These tests use actual entity platforms/registries and a local Modbus TCP emulator. They cover signed charge/discharge wire frames, failed preparation, power limits, control ownership and the eight override/weather IDs. Dashboard attributes are checked in idle and after a charge request; when sibling controller checkouts are available, both dashboard YAML files are parsed and every bridge attribute row is checked against actual Home Assistant states.
+Run `python -m pytest tools/test_runtime_controls.py tools/test_bridge_registry.py tools/test_service_control.py -q` in an environment with Home Assistant 2026.10.4, pytest, pytest-asyncio and PyYAML. These tests use actual entity platforms/registries, real entity services and a local Modbus TCP emulator. They cover signed charge/discharge wire frames, failed preparation, power limits, control ownership and the eight override/weather IDs. They also exercise authenticated negative reference changes and force-charge takeover before, during and after optimizer service calls. Dashboard attributes are checked in idle and after a charge request; when sibling controller checkouts are available, both dashboard YAML files are parsed and every bridge attribute row is checked against actual Home Assistant states.
 
 GitHub CI checks out the controller dashboards for these runtime contract tests. Controller repositories also run the entity/attribute suite against the current bridge, so a dashboard change is validated against actual Home Assistant states rather than only expected name strings.
 

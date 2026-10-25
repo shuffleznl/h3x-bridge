@@ -149,6 +149,13 @@ class PylontechNumber(CoordinatorEntity, NumberEntity):
         }
 
     @property
+    def available(self) -> bool:
+        """Local rate controls remain usable while Modbus is unavailable."""
+        if self.entity_description.key in {"force_charge_rate", "weather_discharge_rate"}:
+            return True
+        return super().available
+
+    @property
     def extra_state_attributes(self):
         if self.entity_description.key != "charge_discharge_power":
             return None
@@ -204,6 +211,9 @@ class PylontechNumber(CoordinatorEntity, NumberEntity):
 
         # Draai de schaling om voor de Modbus verzending (bijv -50 / 0.1 = -500)
         raw_value = int(round(value / self.entity_description.scale))
+        self.coordinator.raise_if_control_owned(
+            self.entity_description.register_address, self.entity_id, value
+        )
 
         if self.entity_description.force_user_mode_for_nonzero:
             success = await self.coordinator.async_set_charge_discharge_power(
@@ -228,4 +238,8 @@ class PylontechNumber(CoordinatorEntity, NumberEntity):
             self.coordinator.data[self.entity_description.key] = raw_value
             self.async_write_ha_state()
         else:
-            raise HomeAssistantError("Command failed or control is owned by force charge/weather reserve")
+            self.coordinator.raise_if_control_owned(
+                self.entity_description.register_address, self.entity_id, value
+            )
+            detail = self.coordinator.last_power_command.get("command_error") if self.entity_description.force_user_mode_for_nonzero else None
+            raise HomeAssistantError(detail or f"Modbus write failed for register {self.entity_description.register_address}; check bridge logs")
