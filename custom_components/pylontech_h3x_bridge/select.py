@@ -8,6 +8,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, MANUFACTURER, MODEL
+from homeassistant.exceptions import HomeAssistantError
 
 # translation from numbers to modes
 EMS_MODE_OPTIONS = {
@@ -30,6 +31,14 @@ class PylontechSelectEntityDescription(SelectEntityDescription):
 
 
 SELECT_TYPES: tuple[PylontechSelectEntityDescription, ...] = (
+    PylontechSelectEntityDescription(
+        key="weather_threshold", name="Weather Alert Threshold", icon="mdi:weather-lightning",
+        options=["yellow", "orange", "red"],
+    ),
+    PylontechSelectEntityDescription(
+        key="charge_method", name="Charge Method", icon="mdi:battery-charging",
+        options=["user_reference", "time_slot_pn_customer", "time_slot_user"],
+    ),
     PylontechSelectEntityDescription(
         key="ems_mode",
         name="EMS Mode",
@@ -84,6 +93,8 @@ class PylontechSelect(CoordinatorEntity, SelectEntity):
     @property
     def current_option(self) -> str | None:
         """Geef de huidige ingestelde optie terug."""
+        if self.entity_description.key in {"weather_threshold", "charge_method"}:
+            return self.coordinator.override.settings[self.entity_description.key]
         raw_value = self.coordinator.data.get(self.entity_description.key)
         if raw_value is not None and str(raw_value) in EMS_MODE_OPTIONS:
             return EMS_MODE_OPTIONS[str(raw_value)]
@@ -91,6 +102,11 @@ class PylontechSelect(CoordinatorEntity, SelectEntity):
 
     async def async_select_option(self, option: str) -> None:
         """Dit wordt aangeroepen als je in Home Assistant een nieuwe optie kiest."""
+        if self.entity_description.key in {"weather_threshold", "charge_method"}:
+            if option not in self.entity_description.options:
+                raise HomeAssistantError("Unsupported control option")
+            await self.coordinator.override.async_set(self.entity_description.key, option)
+            return
         int_value = EMS_MODE_OPTIONS_REVERSE.get(option)
         
         if int_value is not None:
@@ -104,3 +120,5 @@ class PylontechSelect(CoordinatorEntity, SelectEntity):
                 # Update lokaal zodat de UI direct correct staat
                 self.coordinator.data[self.entity_description.key] = str(int_value)
                 self.async_write_ha_state()
+            else:
+                raise HomeAssistantError("Command failed or control is owned by force charge/weather reserve")

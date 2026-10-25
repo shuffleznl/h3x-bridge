@@ -52,6 +52,8 @@ SWITCH_TYPES: tuple[PylontechSwitchEntityDescription, ...] = (
         register_address=40926,
         slave_id=2,
     ),
+    PylontechSwitchEntityDescription(key="force_charge", name="Force Charge", icon="mdi:battery-charging"),
+    PylontechSwitchEntityDescription(key="weather_reserve", name="Weather Reserve", icon="mdi:weather-lightning"),
 )
 
 
@@ -105,6 +107,9 @@ class PylontechSwitch(CoordinatorEntity, SwitchEntity):
 
     async def async_turn_on(self, **kwargs) -> None:
         """Turn the heat pump on (Write 1)."""
+        if self.entity_description.key in {"force_charge", "weather_reserve"}:
+            await self.coordinator.override.async_set(self.entity_description.key, True)
+            return
         success = await self.coordinator.async_write_register(
             address=self.entity_description.register_address,
             value=1,
@@ -117,6 +122,9 @@ class PylontechSwitch(CoordinatorEntity, SwitchEntity):
 
     async def async_turn_off(self, **kwargs) -> None:
         """Turn the heat pump off (Write 0)."""
+        if self.entity_description.key in {"force_charge", "weather_reserve"}:
+            await self.coordinator.override.async_set(self.entity_description.key, False)
+            return
         success = await self.coordinator.async_write_register(
             address=self.entity_description.register_address,
             value=0,

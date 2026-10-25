@@ -13,6 +13,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, MANUFACTURER, MODEL
+from homeassistant.exceptions import HomeAssistantError
 
 @dataclass
 class PylontechNumberEntityDescription(NumberEntityDescription):
@@ -27,6 +28,16 @@ class PylontechNumberEntityDescription(NumberEntityDescription):
 
 
 NUMBER_TYPES: tuple[PylontechNumberEntityDescription, ...] = (
+    PylontechNumberEntityDescription(
+        key="force_charge_rate", name="Force Charge Rate", icon="mdi:battery-charging",
+        native_unit_of_measurement=PERCENTAGE, native_min_value=1,
+        native_max_value=100, native_step=1, mode=NumberMode.BOX,
+    ),
+    PylontechNumberEntityDescription(
+        key="weather_discharge_rate", name="Weather Discharge Rate", icon="mdi:battery-minus",
+        native_unit_of_measurement=PERCENTAGE, native_min_value=0,
+        native_max_value=20, native_step=1, mode=NumberMode.BOX,
+    ),
     PylontechNumberEntityDescription(
         key="charge_discharge_power",
         name="Charge/Discharge Power Ref",
@@ -138,6 +149,8 @@ class PylontechNumber(CoordinatorEntity, NumberEntity):
     @property
     def native_value(self) -> float | None:
         """Geef de huidige ingestelde waarde terug inclusief schaling."""
+        if self.entity_description.key in {"force_charge_rate", "weather_discharge_rate"}:
+            return self.coordinator.override.settings[self.entity_description.key]
         raw_value = self.coordinator.data.get(self.entity_description.key)
         if raw_value is not None:
             native_value = raw_value * self.entity_description.scale
@@ -149,6 +162,21 @@ class PylontechNumber(CoordinatorEntity, NumberEntity):
 
     async def async_set_native_value(self, value: float) -> None:
         """Dit wordt aangeroepen als je in Home Assistant de waarde aanpast."""
+        if self.entity_description.key in {"force_charge_rate", "weather_discharge_rate"}:
+            if not self.native_min_value <= value <= self.native_max_value:
+                raise HomeAssistantError("Rate outside allowed range")
+            await self.coordinator.override.async_set(self.entity_description.key, round(value))
+            return
+        if self.entity_description.key == "charge_discharge_power" and self._context.user_id:
+            # A human adjustment must survive the next optimizer update.
+            if self.coordinator.override.weather_active:
+                raise HomeAssistantError("Disable weather reserve before changing manual power")
+            if value < 0:
+                await self.coordinator.override.async_set("force_charge_rate", max(1, round(abs(value))))
+                await self.coordinator.override.async_set("force_charge", True)
+                return
+            if self.coordinator.override.active:
+                await self.coordinator.override.async_set("force_charge", False)
         if self.entity_description.round_native_value:
             value = round(value)
 
@@ -177,3 +205,5 @@ class PylontechNumber(CoordinatorEntity, NumberEntity):
         if success:
             self.coordinator.data[self.entity_description.key] = raw_value
             self.async_write_ha_state()
+        else:
+            raise HomeAssistantError("Command failed or control is owned by force charge/weather reserve")

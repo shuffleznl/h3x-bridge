@@ -5,8 +5,14 @@
         "title": "Connect to Pylontech H3X Bridge",
         "description": "Enter the Modbus TCP connection details of your inverter.",
         "data": {
-          "host": "Host (IP Address)",
-          "port": "Port"
+          "host": "Hostname or IP address",
+          "port": "Modbus TCP port",
+          "grid_power_entity": "Signed Shelly grid power (W or kW, import positive)",
+          "weather_alert_entity": "Local KNMI warning code or NL Weather alerts",
+          "alert_siren_entity": "Weather warning siren / chime",
+          "inverter_rated_power_w": "Inverter rated power Pn (W)",
+          "battery_power_limit_w": "Battery circuit / power limit (W)",
+          "grid_connection_limit_w": "Total grid connection limit (W)"
         }
       }
     },
@@ -22,15 +28,21 @@
     "step": {
       "init": {
         "title": "Update Pylontech H3X Bridge connection",
-        "description": "Update the Modbus TCP IP address and port. The integration reloads after saving.",
+        "description": "Configure the endpoint and optional warning/grid sources. The connection is tested before saving. Local DNS must resolve from Home Assistant. Power limits apply to manual and weather overrides.",
         "data": {
-          "host": "Host (IP Address)",
-          "port": "Port"
+          "host": "Hostname or IP address",
+          "port": "Modbus TCP port",
+          "grid_power_entity": "Signed Shelly grid power (W or kW, import positive)",
+          "weather_alert_entity": "Local KNMI warning code or NL Weather alerts",
+          "alert_siren_entity": "Weather warning siren / chime",
+          "inverter_rated_power_w": "Inverter rated power Pn (W)",
+          "battery_power_limit_w": "Battery circuit / power limit (W)",
+          "grid_connection_limit_w": "Total grid connection limit (W)"
         }
       }
     },
     "error": {
-      "cannot_connect": "Invalid inverter address.",
+      "cannot_connect": "Cannot resolve or communicate with the inverter. Check DNS in Home Assistant, the hostname, port and Modbus availability. Existing settings have not been changed.",
       "unknown": "Unexpected error occurred."
     }
   },

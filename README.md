@@ -25,7 +25,7 @@ Default entity IDs are based on a clean Pylontech H3X Bridge install:
 | Charge SOC limit | `number.pylontech_h3x_bridge_charge_limit_soc` |
 | Discharge SOC limit | `number.pylontech_h3x_bridge_discharge_limit_soc_eps` |
 
-The H3X integration writes Modbus register `40907` for EMS mode and `40901` for the signed charge/discharge power reference. It must be in `User mode` while forcing charge or discharge.
+The H3X integration writes Modbus register `40907` for EMS mode and `40901` for the signed charge/discharge power reference. Direct reference control requires `User mode`; the manual/weather time-slot methods can also use `PN-Customer mode`.
 
 ## Modbus Entity And Register Map
 
@@ -125,6 +125,39 @@ When clock synchronization is enabled, the integration writes:
 | `40933` (`0x9FE5`) | `(month << 8) | day` |
 | `40934` (`0x9FE6`) | `(hour << 8) | minute` |
 | `40935` (`0x9FE7`) | `(second << 8) | weekday`, where Sunday is `0` |
+
+## Release 0.4.0
+
+Requires Home Assistant 2025.3 or newer; runtime tests use Home Assistant 2026.10.4.
+
+- Hostnames and IPv4/IPv6 endpoints are validated with a real Modbus read before saving. DNS/connect failures abort one poll instead of reconnecting for every register. DNS resolution remains asynchronous; IPv6/IPv4 connection attempts use Happy Eyeballs. A name must resolve from Home Assistant's own container/network, not just from a browser or desktop.
+- A negative value entered by a signed-in user starts a bounded manual override, so an optimizer cannot immediately replace it. API/automation power commands retain their normal behavior. Failed writes now report an error rather than appearing successful.
+- Force-charge and optional KNMI weather-reserve controls own conflicting EMS/SOC/power writes while active. Their status reports whether the inverter has actually entered Charging.
+
+## Manual Charge And Weather Reserve
+
+| Default entity | Purpose |
+| --- | --- |
+| `switch.pylontech_h3x_bridge_force_charge` | Start/stop manual charging; ends at the charge SOC limit or after two hours. |
+| `number.pylontech_h3x_bridge_force_charge_rate` | Requested rate, 1-100% of configured rated inverter power. |
+| `select.pylontech_h3x_bridge_charge_method` | Manual/weather command method: `user_reference` writes signed 40901 in User mode; `time_slot_pn_customer` uses charge slot 4 in EMS mode 5; `time_slot_user` uses the same slot in mode 4. Automation/API reference writes retain their direct signed-register contract. |
+| `switch.pylontech_h3x_bridge_weather_reserve` | Enable the optional natural-disaster / severe-weather reserve policy. Disabled by default. |
+| `select.pylontech_h3x_bridge_weather_alert_threshold` | Minimum KNMI colour: yellow (geel), orange (oranje, default), or red (rood). Higher colours also trigger. |
+| `number.pylontech_h3x_bridge_weather_discharge_rate` | Post-full-charge discharge cap, 0-20% of rated power; default 5%. |
+| `sensor.pylontech_h3x_bridge_control_owner` | `automatic`, `force_charge`, or `weather_reserve`. |
+| `sensor.pylontech_h3x_bridge_charge_control_status` | Charging/hold reason and measured response; attributes identify sources and expiry. |
+
+In **Configure**, select a signed Shelly Pro 3EM grid power sensor (positive import, negative export, W or kW), the local KNMI warning-code/alerts sensor, and optionally a siren/chime. Set the actual inverter **Pn** rating, battery-circuit power cap and total grid connection cap. Defaults are 13.8 kW rated power, 11 kW battery power cap and 17.5 kW grid cap. The override subtracts current battery power from measured import, reserves 500 W headroom, and rounds charge commands down. A selected meter older than 120 seconds, invalid units, missing SOC/temperature, or BMS temperature outside 5-45 C pauses the override. The inverter/BMS protections remain authoritative. These are total three-phase power limits; per-phase fuse protection still requires the installation's own protection or a phase-aware EMS.
+
+For weather, install/configure a local [KNMI integration](https://github.com/golles/ha-knmi) warning-code entity or [NL Weather](https://github.com/PaulVanSchayck/ha-nl-weather) alerts entity, then select it in the bridge. Use a source configured for your location; the bridge does not infer warning colour from ordinary rain/cloud forecasts. It accepts Dutch/English colour codes and structured `alerts` with `color`/`code`, ignoring expired entries. [KNMI's colour definitions](https://www.knmi.nl/kennis-en-datacentrum/uitleg/knmi-waarschuwingen) indicate weather risk, not a guaranteed power outage. KNMI is moving from provinces to flexible warning areas in November 2026, so the location-aware weather integration handles the warning-area feed.
+
+At or above the selected threshold the bridge charges to 100% as fast as the configured caps permit, raises a persistent notification and activates the optional [Home Assistant siren](https://www.home-assistant.io/integrations/siren/) for two seconds. No undocumented inverter buzzer register is written. After reaching 100%, it allows only capped discharge toward measured household demand and stops that discharge at 90% SOC. If an active warning source becomes unavailable, reserve control stays active until a valid lower warning or the user disables it. Clearing the warning restores the previous charge SOC limit and Self-Consumption mode. Weather reserve takes priority over manual charging, which takes priority over optimizer writes.
+
+During manual/weather control, the four built-in inverter schedules are saved and temporarily suspended to prevent competing commands. Settings are restored when the override ends; recovery information is stored across restarts. Time-slot methods temporarily use **slot 4**. Short five-minute slots are refreshed during active charging and disabled on stop or discharge. Midnight-spanning slots are avoided (charging pauses for the last minute of the day). The low-level diagnostic services remain available, but conflicting writes are rejected during an override. Select a time-slot method if your firmware accepts a negative reference without actually charging; successful Modbus read-back alone does not establish physical charging. Test at a low rate while watching Battery Status and Battery Power.
+
+Where module-derived system capacity is available, the override also caps battery power at **0.5C** (500 W per kWh). On a six-module 30.72 kWh pack, the configured 11 kW limit is lower and therefore applies. Full-charge status and saved charge limits survive reloads; a manual session is stopped on reload rather than silently restarting its two-hour timer.
+
+The controller needs Home Assistant and working Modbus communication to enforce software timeouts and power limits. In User-reference mode, a command may remain on the inverter if Home Assistant or the network fails; the device's configured SOC and hardware limits still apply. Time-slot mode provides a device-side time window. This feature does not configure EPS islanding or make the house outage-capable.
 
 ## HACS Installation
 

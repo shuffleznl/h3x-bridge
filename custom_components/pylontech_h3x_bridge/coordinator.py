@@ -22,7 +22,9 @@ from .protocol import (
     encode_time_slot_values,
     time_slot_registers,
 )
-from .transport import H3XModbusTcpClient, ModbusTransportError
+from .transport import H3XModbusTcpClient, ModbusTransportError, ModbusDeviceException
+from .override import OVERRIDE_OWNER
+from .endpoint import normalize_host
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -86,17 +88,19 @@ def force_h3_capacity_for_modules(module_count: int) -> dict[str, float] | None:
 class PylontechCoordinator(DataUpdateCoordinator):
     """Class to manage fetching Modbus data from the inverter."""
 
-    def __init__(self, hass: HomeAssistant, host: str, port: int) -> None:
-        self.host = host
+    def __init__(self, hass: HomeAssistant, host: str, port: int, entry=None) -> None:
+        self.host = normalize_host(host)
         self.port = port
         self.client = self._new_client()
         self._modbus_lock = asyncio.Lock()
         self._last_client_reset: float | None = None
+        self.override = None
         
         super().__init__(
             hass,
             _LOGGER,
             name=DOMAIN,
+            config_entry=entry,
             update_interval=timedelta(seconds=DEFAULT_SCAN_INTERVAL),
         )
 
@@ -141,7 +145,9 @@ class PylontechCoordinator(DataUpdateCoordinator):
         await asyncio.sleep(0.1) 
         try:
             return await self.client.read_holding_registers(address, count, slave)
-        except ModbusTransportError as err:
+        except ModbusDeviceException as err:
+            if not optional:
+                raise
             _LOGGER.debug(
                 "error while reading address %s (Slave %s): %s",
                 address,
@@ -149,11 +155,21 @@ class PylontechCoordinator(DataUpdateCoordinator):
                 err,
             )
             return None
+        except ModbusTransportError:
+            # Abort this poll: reconnecting per register can occupy minutes.
+            raise
 
     async def _async_update_data(self):
         """Fetch data from the inverter via Modbus with serialized access."""
         async with self._modbus_lock:
-            return await self._async_update_data_locked()
+            data = await self._async_update_data_locked()
+        if self.override:
+            try:
+                await self.override.async_tick(data)
+            except Exception as err:
+                raise UpdateFailed(f"Charge override failed: {err}") from err
+            data.update(self.override.diagnostics())
+        return data
 
     async def _async_update_data_locked(self):
         """Fetch data from the inverter via Modbus."""
@@ -373,6 +389,8 @@ class PylontechCoordinator(DataUpdateCoordinator):
         The raw transport discards stale transaction ids, so the socket can stay
         open while the next command consumes and ignores late duplicate ACKs.
         """
+        if 40901 <= address <= 40935 and self.override and self.override.active and not OVERRIDE_OWNER.get():
+            return False
         for attempt in range(1, MODBUS_WRITE_ATTEMPTS + 1):
             try:
                 await self._ensure_connected()
@@ -428,6 +446,8 @@ class PylontechCoordinator(DataUpdateCoordinator):
         settle_after: bool = True,
     ) -> bool:
         """Write multiple already-encoded registers while the Modbus lock is held."""
+        if 40901 <= address <= 40935 and self.override and self.override.active and not OVERRIDE_OWNER.get():
+            return False
         for attempt in range(1, MODBUS_WRITE_ATTEMPTS + 1):
             try:
                 await self._ensure_connected()
@@ -483,6 +503,8 @@ class PylontechCoordinator(DataUpdateCoordinator):
         refresh: bool = False,
     ) -> bool:
         """Write one 16-bit register."""
+        if 40901 <= address <= 40935 and self.override and self.override.active and not OVERRIDE_OWNER.get():
+            return False
         try:
             register_value = (
                 encode_16bit_int(value) if signed else encode_16bit_uint(value)
@@ -515,6 +537,18 @@ class PylontechCoordinator(DataUpdateCoordinator):
         positive values discharge and negative values charge. Any nonzero
         forced reference must be sent while EMS mode is User mode.
         """
+        if self.override and self.override.active and not OVERRIDE_OWNER.get():
+            return False
+        if not -1000 <= value <= 1000:
+            return False
+        if value < 0 and self.override and OVERRIDE_OWNER.get() and self.override.settings["charge_method"] != "user_reference":
+            return await self.override.async_slot_charge(abs(value) / 10)
+        if value >= 0 and self.override and self.override._slot_active:
+            result = await self.async_clear_time_slot(slot=4)
+            if not result["success"]:
+                return False
+            self.override._slot_active = False
+            self.override._slot_until = None
         try:
             register_value = encode_16bit_int(value)
         except ValueError as err:
@@ -569,6 +603,8 @@ class PylontechCoordinator(DataUpdateCoordinator):
         slave: int = 2,
     ) -> dict:
         """Program a time-slot based force-charge window."""
+        if self.override and self.override.active and not OVERRIDE_OWNER.get():
+            return {"success": False, "error": "Force charge/weather reserve owns control"}
         try:
             registers = time_slot_registers(slot)
             slot_values = encode_time_slot_values(
@@ -659,6 +695,8 @@ class PylontechCoordinator(DataUpdateCoordinator):
         slave: int = 2,
     ) -> dict:
         """Disable one time slot."""
+        if self.override and self.override.active and not OVERRIDE_OWNER.get():
+            return {"success": False, "error": "Force charge/weather reserve owns control"}
         try:
             registers = time_slot_registers(slot)
         except ValueError as err:

@@ -19,6 +19,7 @@ import argparse
 import asyncio
 import logging
 import struct
+from datetime import datetime
 from collections import defaultdict
 from collections.abc import MutableMapping
 
@@ -117,6 +118,25 @@ def exception_response(function_code: int, code: int) -> bytes:
     return bytes([function_code | 0x80, code])
 
 
+def simulate_battery(registers: RegisterMap) -> None:
+    """Model documented command direction; this does not model real firmware."""
+    mode = registers[(2, 40907)]
+    raw = struct.unpack(">h", struct.pack(">H", registers[(2, 40901)]))[0] if mode == 4 else 0
+    now = datetime.now().astimezone()
+    hhmm = (now.hour << 8) | now.minute
+    if mode in (4, 5):
+        for base in (40908, 40914, 40920, 40926):
+            if registers[(2, base)] and registers[(2, base + 1)] <= hhmm < registers[(2, base + 2)]:
+                raw = registers[(2, base + 4)] * (-1 if registers[(2, base + 3)] == 0 else 1)
+    if raw < 0 and registers[(2, 30182)] >= registers[(2, 40902)]:
+        raw = 0
+    power = round(raw * 13800 / 1000)
+    set_u16(registers, 2, 30161, 1 if power < 0 else 2 if power > 0 else 3)
+    set_s32(registers, 2, 30162, power)
+    set_s32(registers, 2, 30100, power)
+    set_s32(registers, 2, 30108, 1200 - power)
+
+
 def handle_pdu(registers: RegisterMap, unit_id: int, pdu: bytes) -> bytes:
     if not pdu:
         return exception_response(0, 3)
@@ -124,6 +144,7 @@ def handle_pdu(registers: RegisterMap, unit_id: int, pdu: bytes) -> bytes:
     function_code = pdu[0]
 
     if function_code == 3:
+        simulate_battery(registers)
         if len(pdu) != 5:
             return exception_response(function_code, 3)
         address, count = struct.unpack(">HH", pdu[1:5])

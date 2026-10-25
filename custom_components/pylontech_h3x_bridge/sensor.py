@@ -24,6 +24,8 @@ from .const import DOMAIN, MANUFACTURER, MODEL
 # Hier definiëren we alle sensoren. De 'key' moet exact overeenkomen 
 # met de naam die we in coordinator.py aan de data dictionary hebben gegeven!
 SENSOR_TYPES: tuple[SensorEntityDescription, ...] = (
+    SensorEntityDescription(key="control_owner", name="Control Owner", icon="mdi:account-key"),
+    SensorEntityDescription(key="charge_control_status", name="Charge Control Status", icon="mdi:battery-check"),
     # --- Status Sensoren ---
     SensorEntityDescription(
         key="inverter_status",
@@ -295,6 +297,21 @@ class PylontechSensor(CoordinatorEntity, SensorEntity):
     """Representation of a Pylontech H3X Bridge sensor."""
 
     _attr_has_entity_name = True
+
+    @property
+    def extra_state_attributes(self):
+        if self.entity_description.key != "charge_control_status":
+            return None
+        control = self.coordinator.override
+        return {"weather_alert_entity": control.options.get("weather_alert_entity"),
+                "grid_power_entity": control.options.get("grid_power_entity"),
+                "siren_entity": control.options.get("alert_siren_entity"),
+                "manual_charge_expires": control.manual_until.isoformat() if control.manual_until else None,
+                "weather_full_charge_reached": control.weather_full,
+                "charge_method": control.settings["charge_method"],
+                "requested_power_percent": self.coordinator.data.get("charge_discharge_power", 0) / 10,
+                "measured_battery_status": self.coordinator.data.get("battery_status"),
+                "measured_battery_power_w": self.coordinator.data.get("battery_power")}
 
     def __init__(
         self,

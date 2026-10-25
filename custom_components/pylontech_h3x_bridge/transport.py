@@ -66,7 +66,9 @@ class H3XModbusTcpClient:
 
         try:
             self._reader, self._writer = await asyncio.wait_for(
-                asyncio.open_connection(self.host, self.port),
+                asyncio.open_connection(
+                    self.host, self.port, happy_eyeballs_delay=0.25, interleave=1
+                ),
                 timeout=self.timeout,
             )
         except OSError as err:

@@ -9,6 +9,7 @@ from homeassistant.helpers.typing import ConfigType
 from .const import DOMAIN, CONF_HOST, CONF_PORT
 from .coordinator import PylontechCoordinator
 from .services import async_setup_services
+from .override import ChargeOverride
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -31,10 +32,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     port = entry.options.get(CONF_PORT, entry.data[CONF_PORT])
 
     # Initialize coordinator
-    coordinator = PylontechCoordinator(hass, host, port)
+    coordinator = PylontechCoordinator(hass, host, port, entry)
+    coordinator.override = ChargeOverride(hass, coordinator, entry)
+    await coordinator.override.async_load()
 
     
-    await coordinator.async_config_entry_first_refresh()
+    try:
+        await coordinator.async_config_entry_first_refresh()
+    except Exception:
+        await coordinator.async_close()
+        raise
 
     
     hass.data[DOMAIN][entry.entry_id] = coordinator
@@ -47,8 +54,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Reload the config entry after options change."""
-    await async_unload_entry(hass, entry)
-    await async_setup_entry(hass, entry)
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
