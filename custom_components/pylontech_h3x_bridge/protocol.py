@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import struct
 
 
@@ -90,6 +90,43 @@ def encode_realtime_registers(value: datetime) -> list[int]:
         encode_hhmm(value),
         (value.second << 8) | encode_weekday_for_realtime(value),
     ]
+
+
+def decode_realtime_registers(registers: list[int]) -> datetime:
+    """Decode the inverter's wall clock without assuming its timezone."""
+    if len(registers) != 4 or not 2000 <= registers[0] <= 2099:
+        raise ValueError("Invalid inverter clock registers")
+    year, month_day, hour_minute, second_weekday = registers
+    return datetime(
+        year, month_day >> 8, month_day & 0xFF,
+        hour_minute >> 8, hour_minute & 0xFF, second_weekday >> 8,
+    )
+
+
+def shift_elapsed(value: datetime, delta: timedelta) -> datetime:
+    """Add elapsed time rather than wall-clock time across a DST change."""
+    if value.tzinfo is None:
+        raise ValueError("Timestamp must be timezone-aware")
+    return (value.astimezone(timezone.utc) + delta).astimezone(value.tzinfo)
+
+
+def align_charge_window(
+    start: datetime, end: datetime, requested_now: datetime, device_now: datetime,
+) -> tuple[datetime, datetime]:
+    """Preserve relative timing using the device clock, including UTC/local skew."""
+    if any(value.tzinfo is None for value in (start, end, requested_now)):
+        raise ValueError("Charge-window timestamps must be timezone-aware")
+    reference = requested_now.astimezone(timezone.utc)
+    start_offset = start.astimezone(timezone.utc) - reference
+    end_offset = end.astimezone(timezone.utc) - reference
+    if not timedelta(0) < end_offset <= timedelta(hours=4):
+        raise ValueError("Charge window must end within the next four hours")
+    midnight = device_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    actual_start = max(device_now + start_offset, midnight)
+    actual_end = min(device_now + end_offset, midnight + timedelta(days=1, minutes=-1))
+    if actual_end <= device_now or encode_hhmm(actual_start) >= encode_hhmm(actual_end):
+        raise ValueError("No safe charge window before inverter midnight")
+    return actual_start, actual_end
 
 
 def encode_time_slot_values(

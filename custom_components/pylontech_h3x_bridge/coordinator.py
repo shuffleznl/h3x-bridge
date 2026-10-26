@@ -16,6 +16,8 @@ from .protocol import (
     REGISTER_REALTIME_YEAR,
     SLOT_MODE_CHARGE,
     WEEKDAY_ALL,
+    align_charge_window,
+    decode_realtime_registers,
     encode_16bit_int,
     encode_16bit_uint,
     encode_percent_tenths,
@@ -92,11 +94,15 @@ class PylontechCoordinator(DataUpdateCoordinator):
     def __init__(self, hass: HomeAssistant, host: str, port: int, entry=None) -> None:
         self.host = normalize_host(host)
         self.port = port
+        options = {**entry.data, **entry.options} if entry is not None else {}
+        self.slot_clock_basis = options.get("slot_clock_basis", "home_assistant_local")
         self.client = self._new_client()
         self._modbus_lock = asyncio.Lock()
         self._last_client_reset: float | None = None
         self.override = None
         self.last_power_command = {}
+        self.last_slot_command = {}
+        self._slot_command_sequence = 0
         self.last_rejected_command = None
         self._power_command_sequence = 0
         self._verified_power_command = None
@@ -178,9 +184,12 @@ class PylontechCoordinator(DataUpdateCoordinator):
                 err,
             )
             return None
-        except ModbusTransportError:
+        except ModbusTransportError as err:
             # Abort this poll: reconnecting per register can occupy minutes.
-            raise
+            raise ModbusTransportError(
+                f"Read holding registers {address}..{address + count - 1} "
+                f"(slave {slave}) failed: {err}"
+            ) from err
 
     async def _async_update_data(self):
         """Fetch data from the inverter via Modbus with serialized access."""
@@ -188,6 +197,7 @@ class PylontechCoordinator(DataUpdateCoordinator):
             data = await self._async_update_data_locked()
         if self.override:
             command_sequence = self._power_command_sequence
+            slot_sequence = self._slot_command_sequence
             try:
                 await self.override.async_tick(data)
             except Exception as err:
@@ -198,6 +208,9 @@ class PylontechCoordinator(DataUpdateCoordinator):
                 data["charge_discharge_power"] = reference
                 if reference:
                     data["ems_mode"] = str(mode)
+            if self._slot_command_sequence != slot_sequence:
+                data["ems_mode"] = str(self.last_slot_command["slot_readback_ems_mode"])
+                data[f"period_{self.last_slot_command['slot_number']}"] = 1
         return data
 
     async def _async_update_data_locked(self):
@@ -659,7 +672,7 @@ class PylontechCoordinator(DataUpdateCoordinator):
         start: datetime,
         end: datetime,
         ems_mode: int,
-        sync_clock: bool = True,
+        sync_clock: bool = False,
         clock_time: datetime | None = None,
         weekday_mask: int = WEEKDAY_ALL,
         slave: int = 2,
@@ -669,22 +682,17 @@ class PylontechCoordinator(DataUpdateCoordinator):
             return {"success": False, "error": "Force charge/weather reserve owns control"}
         try:
             registers = time_slot_registers(slot)
-            slot_values = encode_time_slot_values(
-                start,
-                end,
-                mode=SLOT_MODE_CHARGE,
-                power_percent=power_percent,
-                weekday_mask=weekday_mask,
-            )
+            requested_now = clock_time or datetime.now().astimezone()
             power_raw = encode_percent_tenths(power_percent)
             ems_mode_word = encode_16bit_uint(ems_mode)
             realtime_values = encode_realtime_registers(
-                clock_time or datetime.now().astimezone()
+                requested_now
             )
         except ValueError as err:
             return {"success": False, "error": str(err)}
 
         async with self._modbus_lock:
+            self.last_slot_command = {"slot_number": slot, "slot_readback_matches": False}
             if sync_clock:
                 if not await self._write_registers_locked(
                     REGISTER_REALTIME_YEAR,
@@ -693,6 +701,32 @@ class PylontechCoordinator(DataUpdateCoordinator):
                     settle_after=False,
                 ):
                     return {"success": False, "error": "failed to sync inverter clock"}
+
+            try:
+                await self._ensure_connected()
+                device_clock = decode_realtime_registers(
+                    await self.client.read_holding_registers(REGISTER_REALTIME_YEAR, 4, slave)
+                )
+                basis_clock = device_clock if self.slot_clock_basis == "inverter_clock" else requested_now.replace(tzinfo=None)
+                actual_start, actual_end = align_charge_window(start, end, requested_now, basis_clock)
+                slot_values = encode_time_slot_values(
+                    actual_start, actual_end, mode=SLOT_MODE_CHARGE,
+                    power_percent=power_percent, weekday_mask=weekday_mask,
+                )
+                self.last_slot_command.update(
+                    slot_clock_basis=self.slot_clock_basis,
+                    slot_device_clock=device_clock.isoformat(),
+                    slot_requested_clock=requested_now.isoformat(),
+                    slot_clock_offset_seconds=round((device_clock - requested_now.replace(tzinfo=None)).total_seconds()),
+                    slot_start=actual_start.isoformat(), slot_end=actual_end.isoformat(),
+                )
+            except ValueError as err:
+                self.last_slot_command["slot_error"] = str(err)
+                return {"success": False, "error": str(err), "deferred": "midnight" in str(err)}
+            except ModbusTransportError as err:
+                self._reset_client()
+                self.last_slot_command["slot_error"] = str(err)
+                return {"success": False, "error": f"Inverter clock read failed: {err}"}
 
             if not await self._write_register_locked(
                 registers.enable,
@@ -731,11 +765,34 @@ class PylontechCoordinator(DataUpdateCoordinator):
                 raw_value=1,
                 signed=False,
             ):
+                self._reset_client()
+                disabled = await self._write_register_locked(registers.enable, 0, slave, raw_value=0, signed=False)
+                self.last_slot_command["slot_disable_acknowledged"] = disabled
                 return {"success": False, "error": f"failed to enable slot {slot}"}
+
+            try:
+                observed = await self.client.read_holding_registers(registers.enable, 6, slave)
+                observed_mode = (await self.client.read_holding_registers(REGISTER_EMS_MODE, 1, slave))[0]
+                matches = observed == [1, *slot_values] and observed_mode == ems_mode
+                self.last_slot_command.update(
+                    slot_readback_matches=matches, slot_readback_values=observed,
+                    slot_readback_ems_mode=observed_mode,
+                )
+                if not matches:
+                    raise ModbusTransportError("Charge slot/mode read-back did not match the requested settings")
+            except ModbusTransportError as err:
+                self.last_slot_command["slot_error"] = str(err)
+                self._reset_client()
+                # A failed verification must not leave an unowned charge schedule.
+                disabled = await self._write_register_locked(registers.enable, 0, slave, raw_value=0, signed=False)
+                self.last_slot_command["slot_disable_acknowledged"] = disabled
+                suffix = "" if disabled else "; slot disable was not acknowledged, manual stop required"
+                return {"success": False, "error": f"Charge slot verification failed: {err}{suffix}"}
 
         if self.data is not None:
             self.data["ems_mode"] = str(ems_mode)
             self.data[f"period_{slot}"] = 1
+        self._slot_command_sequence += 1
 
         return {
             "success": True,
@@ -748,6 +805,8 @@ class PylontechCoordinator(DataUpdateCoordinator):
             "end_register": slot_values[1],
             "weekday_mask": weekday_mask,
             "sync_clock": sync_clock,
+            "remaining_seconds": (actual_end - basis_clock).total_seconds(),
+            **self.last_slot_command,
         }
 
     async def async_clear_time_slot(
@@ -788,7 +847,7 @@ class PylontechCoordinator(DataUpdateCoordinator):
         power_percent: int,
         duration_minutes: int,
         settle_seconds: int,
-        sync_clock: bool = True,
+        sync_clock: bool = False,
     ) -> dict:
         """Try PN-Customer and User EMS modes for a slot-based charge window."""
         from .protocol import EMS_MODE_PN_CUSTOMER

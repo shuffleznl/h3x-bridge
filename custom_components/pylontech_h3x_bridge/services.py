@@ -14,7 +14,7 @@ import homeassistant.util.dt as dt_util
 
 from .const import DOMAIN
 from .coordinator import PylontechCoordinator
-from .protocol import EMS_MODE_PN_CUSTOMER, EMS_MODE_USER
+from .protocol import EMS_MODE_PN_CUSTOMER, EMS_MODE_USER, shift_elapsed
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ FORCE_CHARGE_SCHEMA = vol.Schema(
             vol.Coerce(int), vol.Range(min=1, max=240)
         ),
         vol.Optional(ATTR_EMS_MODE, default="pn_customer"): vol.In(tuple(EMS_MODE_NAMES)),
-        vol.Optional(ATTR_SYNC_CLOCK, default=True): cv.boolean,
+        vol.Optional(ATTR_SYNC_CLOCK, default=False): cv.boolean,
     }
 )
 
@@ -66,7 +66,7 @@ TEST_MODES_SCHEMA = vol.Schema(
         vol.Optional(ATTR_SETTLE_SECONDS, default=45): vol.All(
             vol.Coerce(int), vol.Range(min=5, max=300)
         ),
-        vol.Optional(ATTR_SYNC_CLOCK, default=True): cv.boolean,
+        vol.Optional(ATTR_SYNC_CLOCK, default=False): cv.boolean,
     }
 )
 
@@ -90,8 +90,8 @@ async def async_setup_services(hass: HomeAssistant, config: ConfigType) -> bool:
     async def force_charge_now(call: ServiceCall) -> ServiceResponse | None:
         coordinator = _coordinator_from_call(hass, call)
         now = dt_util.now()
-        start = now - timedelta(minutes=1)
-        end = now + timedelta(minutes=call.data[ATTR_DURATION_MINUTES])
+        start = shift_elapsed(now, -timedelta(minutes=1))
+        end = shift_elapsed(now, timedelta(minutes=call.data[ATTR_DURATION_MINUTES]))
         ems_mode = EMS_MODE_NAMES[call.data[ATTR_EMS_MODE]]
 
         result = await coordinator.async_program_charge_slot(

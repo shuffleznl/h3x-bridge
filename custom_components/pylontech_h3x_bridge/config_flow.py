@@ -57,6 +57,15 @@ def connection_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
                 "grid_connection_limit_w",
                 default=defaults.get("grid_connection_limit_w", 17500),
             ): vol.All(vol.Coerce(int), vol.Range(min=1000, max=100000)),
+            vol.Optional(
+                "slot_clock_basis",
+                default=defaults.get("slot_clock_basis", "home_assistant_local"),
+            ): selector.SelectSelector(selector.SelectSelectorConfig(
+                options=[
+                    {"value": "home_assistant_local", "label": "Home Assistant local time (existing behavior)"},
+                    {"value": "inverter_clock", "label": "Inverter RTC (diagnostic option)"},
+                ], mode=selector.SelectSelectorMode.DROPDOWN,
+            )),
         }
     )
 

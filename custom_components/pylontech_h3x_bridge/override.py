@@ -12,6 +12,8 @@ from homeassistant.helpers.storage import Store
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
 
+from .protocol import shift_elapsed
+
 OVERRIDE_OWNER = ContextVar("h3x_override_owner", default=False)
 LOGGER = logging.getLogger(__name__)
 LEVELS = {
@@ -217,22 +219,28 @@ class ChargeOverride:
             and self._last_command == -round(percent * 10)
         ):
             return True
-        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        end = min(now + timedelta(minutes=5), midnight + timedelta(days=1, minutes=-1))
+        end = shift_elapsed(now, timedelta(minutes=5))
         result = await self.coordinator.async_program_charge_slot(
             slot=4,
             power_percent=max(1, round(percent)),
-            start=max(now - timedelta(minutes=1), midnight),
+            start=shift_elapsed(now, -timedelta(minutes=1)),
             end=end,
             ems_mode=5
             if self.settings["charge_method"] == "time_slot_pn_customer"
             else 4,
             clock_time=now,
+            sync_clock=False,
         )
+        if result.get("deferred"):
+            if not await self.coordinator.async_set_charge_discharge_power(0):
+                return False
+            self.reason = "paused: inverter clock midnight boundary"
+            self.power_budget.update(target_reference_raw=0, permitted_charge_w=0)
+            return True
+        if not result["success"]:
+            self.coordinator.last_slot_command["slot_error"] = result.get("error", "Charge-slot programming failed")
         if result["success"]:
-            self._slot_until = min(
-                now + timedelta(minutes=3), end - timedelta(seconds=30)
-            )
+            self._slot_until = now.astimezone(timezone.utc) + timedelta(seconds=min(180, max(0, result["remaining_seconds"] - 30)))
             self._slot_active = True
             self._last_command = -round(percent * 10)
             await self._save()
@@ -255,7 +263,7 @@ class ChargeOverride:
         )
         if raw != self._last_command or slot_due:
             if not await c.async_set_charge_discharge_power(raw):
-                detail = ("Charge-slot programming failed; check bridge logs"
+                detail = (c.last_slot_command.get("slot_error", "Charge-slot programming failed; check bridge logs")
                           if raw < 0 and self.settings["charge_method"] != "user_reference"
                           else c.last_power_command.get("command_error"))
                 raise RuntimeError(detail or "Charge/discharge command failed")
@@ -449,15 +457,6 @@ class ChargeOverride:
                     f"paused: charging power below minimum {rated / 100:.0f} W; "
                     f"headroom {headroom:.0f} W, battery cap {maximum:.0f} W"
                 )
-        local = dt_util.now()
-        if (
-            raw < 0
-            and self.settings["charge_method"] != "user_reference"
-            and local.hour == 23
-            and local.minute == 59
-        ):
-            raw = 0
-            self.reason = "time-slot charging paused until midnight"
         self.power_budget["target_reference_raw"] = raw
         if raw:
             expected_mode = (
@@ -471,4 +470,4 @@ class ChargeOverride:
             ):
                 self._last_command = None
         await self._command(raw)
-        self._observe_charging(raw, data)
+        self._observe_charging(self.power_budget.get("target_reference_raw", raw), data)

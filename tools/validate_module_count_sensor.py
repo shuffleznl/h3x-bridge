@@ -63,7 +63,7 @@ def main() -> None:
     require(sensor, 'key="battery_usable_capacity"', "bridge sensor")
     require(sensor, 'key="battery_usable_capacity_theoretical"', "bridge sensor")
     require(sensor, 'key="battery_usable_capacity_deviation_pct"', "bridge sensor")
-    require(manifest, '"version": "0.4.2"', "bridge manifest")
+    require(manifest, '"version": "0.4.3"', "bridge manifest")
 
     assignments = literal_assignments(coordinator)
     system_capacity = assignments["FORCE_H3_SYSTEM_CAPACITY_KWH"]

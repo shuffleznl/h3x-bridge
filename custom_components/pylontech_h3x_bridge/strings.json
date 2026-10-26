@@ -12,7 +12,8 @@
           "alert_siren_entity": "Weather warning siren / chime",
           "inverter_rated_power_w": "Inverter rated power Pn (W)",
           "battery_power_limit_w": "Battery circuit / power limit (W)",
-          "grid_connection_limit_w": "Total grid connection limit (W)"
+          "grid_connection_limit_w": "Total grid connection limit (W)",
+          "slot_clock_basis": "Time-slot clock basis (RTC option requires commissioning)"
         }
       }
     },
@@ -37,7 +38,8 @@
           "alert_siren_entity": "Weather warning siren / chime",
           "inverter_rated_power_w": "Inverter rated power Pn (W)",
           "battery_power_limit_w": "Battery circuit / power limit (W)",
-          "grid_connection_limit_w": "Total grid connection limit (W)"
+          "grid_connection_limit_w": "Total grid connection limit (W)",
+          "slot_clock_basis": "Time-slot clock basis (RTC option requires commissioning)"
         }
       }
     },

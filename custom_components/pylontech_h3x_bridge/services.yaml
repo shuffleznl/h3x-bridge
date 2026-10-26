@@ -43,7 +43,8 @@ force_charge_now:
             - user
     sync_clock:
       required: false
-      default: true
+      description: Optional explicit clock write. Slots always use inverter clock read-back, not the HA local hour.
+      default: false
       selector:
         boolean:
 
@@ -93,7 +94,8 @@ test_force_charge_modes:
           mode: box
     sync_clock:
       required: false
-      default: true
+      description: Optional explicit clock write. Normally leave off to avoid fighting device/cloud clock synchronization.
+      default: false
       selector:
         boolean:
 

@@ -2,3 +2,5 @@ upstream_HA-pylontech-force-H3X/
 *.pyc
 __pycache__/
 .pytest_cache/
+.secrets/
+live-validation/

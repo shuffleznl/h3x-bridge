@@ -1,9 +1,12 @@
 """Exercise bridge ownership through real Home Assistant entity services."""
 
 from datetime import timedelta
+import asyncio
 import importlib
 import logging
 from pathlib import Path
+import threading
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -259,6 +262,100 @@ def controller_module(repo, domain):
     if str(path) not in custom_components.__path__:
         custom_components.__path__.append(str(path))
     return importlib.import_module(f"custom_components.{domain}.coordinator")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change_options", [False, True])
+async def test_predictive_solver_does_not_block_ha_and_discards_changed_options(service_system, monkeypatch, change_options):
+    hass, coordinator, control, entry, registers = service_system
+    module = controller_module("h3x-predictive-dispatch", "h3x_predictive_dispatch")
+    dispatch = module.H3XPredictiveDispatchCoordinator(hass, entry)
+    main_thread = threading.get_ident()
+    started, release = threading.Event(), threading.Event()
+
+    def slow_optimizer(slots, settings):
+        assert threading.get_ident() != main_thread
+        started.set()
+        assert release.wait(5)
+        return SimpleNamespace(schedule=[], reason="worker completed")
+
+    monkeypatch.setattr(dispatch._predictive_optimizer, "optimize", slow_optimizer)
+    now = module.dt_util.utcnow()
+    band = module.ForecastBand(500, 1000, 1500, 10, 0.8)
+    task = asyncio.create_task(dispatch._run_predictive_optimizer(
+        future_slots=[module.PriceSlot(now, now + timedelta(minutes=15), 0.1)],
+        current_energy=15, min_energy=4, max_energy=26, terminal_energy=15,
+        charge_allowed=True, discharge_allowed=True, usable_capacity_kwh=29.17,
+        periodic_full_charge_due=False, load_forecast=SimpleNamespace(bands=[band]),
+        solar_forecast=[band], current_load_power_w=1000, current_solar_power_w=0,
+        block_ev_discharge=False, ev_threshold_w=1000,
+    ))
+    try:
+        for _ in range(100):
+            if started.is_set():
+                break
+            if task.done():
+                await task
+            await asyncio.sleep(0.01)
+        assert started.is_set() and not task.done()
+        hass.states.async_set("sensor.executor_test", "responsive")
+        assert hass.states.get("sensor.executor_test").state == "responsive"
+        if change_options:
+            hass.config_entries.async_update_entry(entry, options={**entry.options, "max_soc": 85})
+    finally:
+        release.set()
+    result = await task
+    if change_options:
+        assert result.action == "failsafe"
+        assert "settings changed" in result.reason
+    else:
+        assert result.action == "idle" and result.reason == "worker completed"
+
+
+@pytest.mark.asyncio
+async def test_async_predictive_decision_with_real_optimizer(service_system):
+    hass, coordinator, control, entry, registers = service_system
+    module = controller_module("h3x-predictive-dispatch", "h3x_predictive_dispatch")
+    hass.config_entries.async_update_entry(entry, options={
+        **entry.options, module.CONF_AREA: "NL", module.CONF_CURRENCY: "EUR",
+        module.CONF_PERIODIC_FULL_CHARGE_ENABLED: False,
+    })
+    dispatch = module.H3XPredictiveDispatchCoordinator(hass, entry)
+    now = module.dt_util.utcnow()
+    slots = [module.PriceSlot(
+        now + timedelta(minutes=15 * index), now + timedelta(minutes=15 * (index + 1)), price,
+    ) for index, price in enumerate([0.05, 0.07, 0.3, 0.4, 0.3, 0.1, 0.06, 0.2])]
+    decision = await dispatch._compute_decision(slots)
+    assert decision.action in {"idle", "charge", "discharge"}
+    assert decision.current_price is not None
+    assert decision.attributes["optimizer"] == "predictive_dispatch_dp_v1"
+    assert registers[(2, 40901)] == 0  # Computing is not device actuation.
+
+
+@pytest.mark.asyncio
+async def test_ev_sensor_failure_during_solve_blocks_discharge(service_system, monkeypatch):
+    hass, coordinator, control, entry, registers = service_system
+    module = controller_module("h3x-predictive-dispatch", "h3x_predictive_dispatch")
+    ev_entity = "sensor.test_ev_power"
+    hass.states.async_set(ev_entity, "11000", {"unit_of_measurement": "W"})
+    hass.config_entries.async_update_entry(entry, options={
+        **entry.options, module.CONF_AREA: "NL", module.CONF_CURRENCY: "EUR",
+        module.CONF_PERIODIC_FULL_CHARGE_ENABLED: False,
+        module.CONF_EV_FORECAST_MODE: "sensor", module.CONF_EV_POWER_ENTITY: ev_entity,
+        module.CONF_BLOCK_DISCHARGE_WHILE_EV_CHARGING: True,
+    })
+    dispatch = module.H3XPredictiveDispatchCoordinator(hass, entry)
+
+    async def solve(**kwargs):
+        hass.states.async_set(ev_entity, "unavailable", {"unit_of_measurement": "W"})
+        return module.Decision(action="discharge", target_power_w=1500, target_power_percent=10)
+
+    monkeypatch.setattr(dispatch, "_run_predictive_optimizer", solve)
+    now = module.dt_util.utcnow()
+    decision = await dispatch._compute_decision([module.PriceSlot(now, now + timedelta(minutes=15), 0.3)])
+    assert decision.action == "idle"
+    assert decision.target_power_w == 0
+    assert "EV charging state unavailable" in decision.reason
 
 
 @pytest.mark.asyncio

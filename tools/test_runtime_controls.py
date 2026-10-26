@@ -9,6 +9,7 @@ import socket
 import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from zoneinfo import ZoneInfo
 
 import pytest
 import pytest_asyncio
@@ -32,6 +33,7 @@ from custom_components.pylontech_h3x_bridge.transport import (
     ModbusTransportError,
     ModbusDeviceException,
 )
+from custom_components.pylontech_h3x_bridge.protocol import encode_realtime_registers, align_charge_window, shift_elapsed
 from h3x_modbus_emulator import build_registers, handle_client
 
 
@@ -420,6 +422,206 @@ async def test_slot_modes_and_stop(system, method, mode):
     assert registers[(2, 40926)] == 0
     assert await c.async_set_charge_discharge_power(100)
     assert registers[(2, 40907)] == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", [4, 5])
+async def test_slot_uses_inverter_rtc_when_ha_is_one_hour_ahead(system, mode):
+    hass, c, control, entry, registers = system
+    c.slot_clock_basis = "inverter_clock"
+    ha_now = datetime(2026, 10, 26, 2, 10, tzinfo=ZoneInfo("Europe/Amsterdam"))
+    device_now = datetime(2026, 10, 26, 1, 10)
+    for address, value in zip(range(40932, 40936), encode_realtime_registers(device_now)):
+        registers[(2, address)] = value
+    registers[(2, 40907)] = mode
+    for address, value in zip(range(40926, 40932), [1, 0x0209, 0x020F, 0, 100, 0x7F]):
+        registers[(2, address)] = value
+    assert (await c.client.read_holding_registers(30161, 1, 2))[0] == 3
+    result = await c.async_program_charge_slot(
+        slot=4, power_percent=10, start=ha_now - timedelta(minutes=1),
+        end=ha_now + timedelta(minutes=5), ems_mode=mode, clock_time=ha_now,
+    )
+    assert result["success"] and result["slot_readback_matches"]
+    assert result["slot_clock_offset_seconds"] == -3600
+    assert result["start_register"] == 0x0109
+    assert result["end_register"] == 0x010F
+    assert registers[(2, 40934)] == 0x010A  # No unrequested clock write.
+    assert (await c.client.read_holding_registers(30161, 1, 2))[0] == 1
+
+
+def test_slot_clock_alignment_crosses_dates_and_handles_midnight():
+    ha_now = datetime(2026, 10, 26, 1, 0, tzinfo=ZoneInfo("Europe/Amsterdam"))
+    start, end = align_charge_window(
+        ha_now - timedelta(minutes=1), ha_now + timedelta(minutes=5),
+        ha_now, datetime(2026, 10, 26, 0, 0, 10),
+    )
+    assert start == datetime(2026, 10, 26)
+    assert end == datetime(2026, 10, 26, 0, 5, 10)
+    with pytest.raises(ValueError, match="midnight"):
+        align_charge_window(ha_now, ha_now + timedelta(minutes=5), ha_now, datetime(2026, 10, 25, 23, 59, 10))
+
+
+def test_elapsed_slot_duration_across_dst_fallback():
+    now = datetime(2026, 10, 25, 2, 58, tzinfo=ZoneInfo("Europe/Amsterdam"))
+    end = shift_elapsed(now, timedelta(minutes=5))
+    assert end.astimezone(timezone.utc) - now.astimezone(timezone.utc) == timedelta(minutes=5)
+    start_device, end_device = align_charge_window(
+        shift_elapsed(now, -timedelta(minutes=1)), end, now,
+        now.astimezone(timezone.utc).replace(tzinfo=None),
+    )
+    assert end_device - start_device == timedelta(minutes=6)
+
+
+@pytest.mark.asyncio
+async def test_slot_invalid_clock_does_not_write_or_enable(system):
+    hass, c, control, entry, registers = system
+    registers[(2, 40932)] = 0
+    now = datetime.now(timezone.utc)
+    result = await c.async_program_charge_slot(
+        slot=4, power_percent=10, start=now - timedelta(minutes=1),
+        end=now + timedelta(minutes=5), ems_mode=5, clock_time=now,
+    )
+    assert not result["success"]
+    assert registers[(2, 40926)] == 0
+    assert registers[(2, 40907)] == 0
+
+
+@pytest.mark.asyncio
+async def test_owned_slot_reports_verified_mode_in_same_refresh(system):
+    hass, c, control, entry, registers = system
+    control.settings["charge_method"] = "time_slot_pn_customer"
+    control.manual_until = datetime.now(timezone.utc) + timedelta(minutes=5)
+    await c.async_refresh()
+    assert c.last_update_success
+    assert c.data["ems_mode"] == "5"
+    assert c.data["period_4"] == 1
+    assert c.last_slot_command["slot_readback_matches"]
+
+
+@pytest.mark.asyncio
+async def test_rtc_midnight_pause_recovers_without_telemetry_failure(system):
+    hass, c, control, entry, registers = system
+    c.slot_clock_basis = "inverter_clock"
+    control.settings["charge_method"] = "time_slot_user"
+    control.manual_until = datetime.now(timezone.utc) + timedelta(minutes=5)
+    for address, value in zip(range(40932, 40936), encode_realtime_registers(datetime(2026, 10, 26, 23, 59, 20))):
+        registers[(2, address)] = value
+    await c.async_refresh()
+    assert c.last_update_success
+    assert "midnight" in control.reason
+    assert control.charging_response == "not_requested"
+    assert registers[(2, 40926)] == 0
+    assert registers[(2, 40901)] == 0
+    for address, value in zip(range(40932, 40936), encode_realtime_registers(datetime(2026, 10, 27, 0, 0, 20))):
+        registers[(2, address)] = value
+    await c.async_refresh()
+    assert c.last_update_success
+    assert registers[(2, 40926)] == 1
+
+
+@pytest.mark.asyncio
+async def test_default_slot_clock_basis_preserves_ha_local_time(system):
+    hass, c, control, entry, registers = system
+    now = datetime(2026, 10, 26, 2, 10, tzinfo=ZoneInfo("Europe/Amsterdam"))
+    for address, value in zip(range(40932, 40936), encode_realtime_registers(datetime(2026, 10, 26, 1, 10))):
+        registers[(2, address)] = value
+    result = await c.async_program_charge_slot(
+        slot=4, power_percent=10, start=now - timedelta(minutes=1), end=now + timedelta(minutes=5),
+        ems_mode=4, clock_time=now,
+    )
+    assert result["success"]
+    assert result["slot_clock_basis"] == "home_assistant_local"
+    assert result["start_register"] == 0x0209
+    assert result["end_register"] == 0x020F
+
+
+@pytest.mark.asyncio
+async def test_slot_readback_mismatch_disables_schedule(system):
+    hass, c, control, entry, registers = system
+    read = c.client.read_holding_registers
+
+    async def wrong_readback(address, count, slave):
+        result = await read(address, count, slave)
+        if address == 40926:
+            result[4] += 1
+        return result
+
+    c.client.read_holding_registers = wrong_readback
+    now = datetime.now(timezone.utc)
+    result = await c.async_program_charge_slot(
+        slot=4, power_percent=10, start=now - timedelta(minutes=1),
+        end=now + timedelta(minutes=5), ems_mode=5, clock_time=now,
+    )
+    assert not result["success"]
+    assert registers[(2, 40926)] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("combined,reference_first,function", [(False, False, 6), (True, False, 6), (False, True, 6), (False, True, 16)])
+async def test_isolated_live_tool_stops_and_restores_bridge_on_meter_failure(system, monkeypatch, tmp_path, combined, reference_first, function):
+    import ha_isolated_charge_validation as isolated
+    from test_ha_charge_validation import healthy_snapshot
+
+    hass, c, control, entry, registers = system
+    registers[(1, 0x1436)] = 6
+    paused = False
+    grid_reads = 0
+
+    class FakeRemote:
+        def __init__(self, *args):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def snapshot(self):
+            return healthy_snapshot()
+
+        async def request(self, path, data=None):
+            nonlocal grid_reads
+            if path == "/api/config":
+                return {"time_zone": "Europe/Amsterdam"}
+            if path == "/api/config/config_entries/entry":
+                return [{"entry_id": "remote", "domain": "pylontech_h3x_bridge",
+                         "state": "not_loaded" if paused else "loaded", "disabled_by": "user" if paused else None}]
+            if path.startswith("/api/states/"):
+                grid_reads += 1
+                if grid_reads > (2 if reference_first else 1):
+                    raise RuntimeError("meter failed")
+                return {"state": "1500", "attributes": {"unit_of_measurement": "W"}}
+            if path == "/api/template":
+                return datetime.now(timezone.utc).isoformat()
+            raise AssertionError(path)
+
+    async def command(client, data):
+        nonlocal paused
+        paused = bool(data["disabled_by"])
+        return {"require_restart": False}
+
+    monkeypatch.setattr(isolated, "HAClient", FakeRemote)
+    monkeypatch.setattr(isolated, "websocket_command", command)
+    credential = tmp_path / "credential"
+    credential.write_text("test-token")
+    with pytest.raises(RuntimeError, match="meter failed"):
+        await isolated.run(SimpleNamespace(
+            allow_isolated_slot_tests=True, hold_seconds=60, rates=[10],
+            methods=["time_slot_user"], token_file=credential, output=tmp_path / "live",
+            url="http://unused", modbus_host="localhost", modbus_port=c.port, bridge_entry_id="remote",
+            combined_reference_slot=combined,
+            reference_before_mode=reference_first,
+            reference_write_function=function,
+            inverter_rated_power_w=15000,
+        ))
+    assert not paused
+    assert registers[(2, 40901)] == 0
+    assert registers[(2, 40926)] == 0
+    assert registers[(2, 40907)] == 0
+    assert registers[(2, 40902)] == 95
+    if reference_first:
+        assert "reference_before_mode_verified" in (tmp_path / "live/events.jsonl").read_text()
 
 
 def test_warning_expiry_and_unknown():

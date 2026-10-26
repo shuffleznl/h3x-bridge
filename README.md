@@ -126,6 +126,36 @@ When clock synchronization is enabled, the integration writes:
 | `40934` (`0x9FE6`) | `(hour << 8) | minute` |
 | `40935` (`0x9FE7`) | `(second << 8) | weekday`, where Sunday is `0` |
 
+## Release 0.4.3
+
+- Add a selectable time-slot clock basis: existing Home Assistant local time
+  remains the default; inverter RTC alignment is an explicit commissioning
+  option. Live inspection found a roughly one-hour difference, but that alone
+  does not establish which clock the firmware's schedule engine interprets.
+- Do not rewrite the inverter clock during manual/weather slot charging.
+  Explicit `sync_clock` remains available but defaults to false. Read and verify
+  slot enable, start/end, direction, power, weekdays and EMS mode after writing.
+  Failed verification attempts to disable the slot and reports the failure.
+- Expose `slot_clock_basis`, `slot_device_clock`, `slot_clock_offset_seconds`,
+  and `slot_readback_matches` on Charge Control Status. Report verified EMS/slot
+  changes in the same coordinator update, avoiding a stale mode for one poll.
+- Include the actual register range and slave in polling transport errors.
+- Add authenticated live-recording and supervised commissioning tools, with
+  fake-server/emulator safety and cleanup tests. Credentials and private live
+  reports are excluded from Git.
+
+Live testing confirmed correct negative-reference read-back and successful
+slot read-back in both clock comparisons, but **has not established useful
+physical grid charging**. A 100% requested rate and -92% effective reference are expected
+with 15 kW configured Pn and a 13.8 kW cap. Do not remove caps or invert signs to
+make these values equal. The observed device import limit was 13.8 kW; BMS
+charge prohibition was clear and its charge-current limit was 40 A. These are
+commissioning observations, not installation defaults or a firmware diagnosis.
+
+See the [live commissioning report](docs/LIVE_CHARGE_VALIDATION.md) for the
+rate/mode/function-code comparisons, verified restoration and remaining
+device-side checks. Read-back verification is not a charging-performance pass.
+
 ## Release 0.4.2
 
 - Replace the ambiguous "Command failed or control is owned" service error. A conflicting entity/register is now identified as an ownership rejection; genuine power-write, mode-write and read-back failures report their actual stage.
@@ -180,6 +210,30 @@ Requires Home Assistant 2025.3 or newer; runtime tests use Home Assistant 2026.1
 | `sensor.pylontech_h3x_bridge_charge_control_status` | Local control intent/pause/failure reason. Attributes separately expose measured charging response, telemetry availability, sources, expiry and actual command failures. |
 
 In **Configure**, select a signed Shelly Pro 3EM grid power sensor (positive import, negative export, W or kW), the local KNMI warning-code/alerts sensor, and optionally a siren/chime. Set the actual inverter **Pn** rating, battery-circuit power cap and total grid connection cap. Defaults are 13.8 kW rated power, 11 kW battery power cap and 17.5 kW grid cap. The override subtracts current battery power from measured import, reserves 500 W headroom, and rounds charge commands down. A selected meter older than 120 seconds, invalid units, missing SOC/temperature, or BMS temperature outside 5-45 C pauses the override. The inverter/BMS protections remain authoritative. These are total three-phase power limits; per-phase fuse protection still requires the installation's own protection or a phase-aware EMS.
+
+**Requested rate is not signed register read-back.** `force_charge_rate` is a
+positive local request magnitude, not a second Modbus register. The reference is
+negative for charging and reflects the effective command after power, grid and
+0.5C caps. For example, a 100% request with 15 kW configured Pn and a 13.8 kW cap
+correctly becomes -92% at register 40901. With no limiting, a 10% request becomes
+-10%. Do not raise safety caps or invert signs merely to make the two numbers
+equal. With a time-slot method, the slot's positive power magnitude and charge
+mode control charging instead; register 40901 is not its effective setpoint.
+
+The inverter also has its own **Power from Grid** setting, separate from the
+bridge's grid-connection safety cap. Manufacturer V1.2 lists this as unsigned
+32-bit `ImpWMeterLim` at registers **40937-40938**. The current bridge does not
+read or modify it. Its value and BMS charge-forbidden/current-limit flags are
+important diagnostics when a negative reference reads back correctly but actual
+charging power remains near zero. Never bypass a BMS prohibition or guess a new
+device import limit. The manufacturer's [PylontechPro SOP](https://pimassetsprdst.blob.core.windows.net/assets/apc_Original/84/54/130168454.pdf)
+describes the independent device setting under Energy Management.
+
+For supervised live recordings and bounded low-rate comparison of direct and
+slot control, see [the validation tools](tools/README.md#live-home-assistant-validation).
+A successful register write or a Charging status bit alone does not establish
+delivery of the requested power. A service timeout can also occur during the
+mandatory polling step before a new power command is sent.
 
 For weather, install/configure a local [KNMI integration](https://github.com/golles/ha-knmi) warning-code entity or [NL Weather](https://github.com/PaulVanSchayck/ha-nl-weather) alerts entity, then select it in the bridge. Use a source configured for your location; the bridge does not infer warning colour from ordinary rain/cloud forecasts. It accepts Dutch/English colour codes and structured `alerts` with `color`/`code`, ignoring expired entries. [KNMI's colour definitions](https://www.knmi.nl/kennis-en-datacentrum/uitleg/knmi-waarschuwingen) indicate weather risk, not a guaranteed power outage. KNMI is moving from provinces to flexible warning areas in November 2026, so the location-aware weather integration handles the warning-area feed.
 

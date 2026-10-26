@@ -101,6 +101,12 @@ def build_registers() -> RegisterMap:
     set_u16(registers, 2, 40914, 0)
     set_u16(registers, 2, 40920, 0)
     set_u16(registers, 2, 40926, 0)
+    now = datetime.now().astimezone()
+    for address, value in zip(range(40932, 40936), (
+        now.year, (now.month << 8) | now.day,
+        (now.hour << 8) | now.minute, (now.second << 8) | ((now.weekday() + 1) % 7),
+    )):
+        set_u16(registers, 2, address, value)
 
     # Slave 1: BMS.
     set_u16(registers, 1, 5123, 5120)
@@ -122,8 +128,8 @@ def simulate_battery(registers: RegisterMap) -> None:
     """Model documented command direction; this does not model real firmware."""
     mode = registers[(2, 40907)]
     raw = struct.unpack(">h", struct.pack(">H", registers[(2, 40901)]))[0] if mode == 4 else 0
-    now = datetime.now().astimezone()
-    hhmm = (now.hour << 8) | now.minute
+    # Slot matching follows the device RTC, not the test host's timezone.
+    hhmm = registers[(2, 40934)]
     if mode in (4, 5):
         for base in (40908, 40914, 40920, 40926):
             if registers[(2, base)] and registers[(2, base + 1)] <= hhmm < registers[(2, base + 2)]:
